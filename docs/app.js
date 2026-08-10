@@ -118,9 +118,10 @@
     try {
       const m = await (await fetch(MANIFEST)).json();
       manifest = m;
-      latest = await (await fetch(manifest.files.latestJson || "data/latest.json")).json();
+      // filtered.json holds the full corpus; latest.json is the default-shown subset.
+      latest = await (await fetch(manifest.files.filteredJson || "data/filtered.json")).json();
     } catch (e) {
-      try { latest = await (await fetch("data/latest.json")).json(); } catch (e2) { latest = []; }
+      try { latest = await (await fetch("data/filtered.json")).json(); } catch (e2) { latest = []; }
     }
     all = Array.isArray(latest) ? latest : (latest && latest.data) || [];
     // init filter dropdowns
