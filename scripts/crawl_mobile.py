@@ -205,39 +205,45 @@ async def run() -> list[dict[str, Any]]:
 
         results: list[dict[str, Any]] = []
         for range_tab, region in (("全网资费", "全国"), ("北京资费", "北京")):
-            await page.evaluate(
-                """(label) => {
-                    const els = [...document.querySelectorAll('.range-tab')];
-                    const t = els.find(e => (e.innerText||'').trim() === label);
-                    if (t) t.click();
-                }""",
-                range_tab,
-            )
-            await page.wait_for_timeout(8000)
-            # scroll step by step, collecting cards at every stop (virtual scrolling);
-            # then scroll back to top and sweep down again to force all rows to render
             collected: list[str] = []
-            for sweep in range(2):
-                prev = 0
-                for _ in range(30):
-                    raw_cards = await extract_cards(page)
-                    for text in raw_cards:
-                        if text not in collected:
-                            collected.append(text)
-                    await page.mouse.wheel(0, 1500)
-                    await page.wait_for_timeout(1500)
-                    cur = await page.evaluate("() => document.body.innerText.length")
-                    if cur == prev and not raw_cards:
-                        break
-                    prev = cur
-                if sweep == 0:
-                    # jump back to top for the second sweep
-                    await page.evaluate("() => window.scrollTo(0, 0)")
-                    await page.wait_for_timeout(3000)
-            raw_cards = await extract_cards(page)
-            for text in raw_cards:
-                if text not in collected:
-                    collected.append(text)
+            for tab_attempt in range(3):
+                await page.evaluate(
+                    """(label) => {
+                        const els = [...document.querySelectorAll('.range-tab')];
+                        const t = els.find(e => (e.innerText||'').trim() === label);
+                        if (t) t.click();
+                    }""",
+                    range_tab,
+                )
+                await page.wait_for_timeout(8000)
+                # scroll step by step, collecting cards at every stop (virtual scrolling);
+                # then scroll back to top and sweep down again to force all rows to render
+                collected = []
+                for sweep in range(2):
+                    prev = 0
+                    for _ in range(30):
+                        raw_cards = await extract_cards(page)
+                        for text in raw_cards:
+                            if text not in collected:
+                                collected.append(text)
+                        await page.mouse.wheel(0, 1500)
+                        await page.wait_for_timeout(1500)
+                        cur = await page.evaluate("() => document.body.innerText.length")
+                        if cur == prev and not raw_cards:
+                            break
+                        prev = cur
+                    if sweep == 0:
+                        # jump back to top for the second sweep
+                        await page.evaluate("() => window.scrollTo(0, 0)")
+                        await page.wait_for_timeout(3000)
+                raw_cards = await extract_cards(page)
+                for text in raw_cards:
+                    if text not in collected:
+                        collected.append(text)
+                if collected:
+                    break
+                print(f"  {range_tab} tab produced 0 cards on attempt {tab_attempt + 1}; retrying")
+                await page.wait_for_timeout(8000)
             print(f"  {range_tab}: {len(collected)} cards")
             for text in collected:
                 card = parse_card(text)

@@ -28,7 +28,7 @@ jobs:
       - name: Detect recent crawler failures and trigger AI repair
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
+        run: |
           python - <<'PYEOF'
           import json, os, subprocess, datetime
 
@@ -51,9 +51,8 @@ jobs:
                       # only recent failures in the last 12h
                       if (now - created).total_seconds() < 43200:
                           failed.append((wf, run["databaseId"], run["conclusion"]))
-              break  # just check the most recent run per workflow below
 
-          # fallback: single list check
+          # fallback: single list check (workflow-name based) when per-workflow query found nothing
           if not failed:
               out = subprocess.run(
                   ["gh", "run", "list", "--repo", repo, "--limit", "30",
