@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -192,6 +193,15 @@ def contract_desc(name: str, content: str) -> str:
     return ""
 
 
+def _proxy_server() -> str | None:
+    """Playwright does not read HTTP_PROXY env vars; pass the mihomo proxy explicitly."""
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        val = (os.environ.get(key) or "").strip()
+        if val and not val.lower().startswith("socks"):
+            return val
+    return None
+
+
 def run(playwright) -> list[dict[str, Any]]:
     browser = new_browser(playwright)
     try:
@@ -200,6 +210,7 @@ def run(playwright) -> list[dict[str, Any]]:
             viewport={"width": 1440, "height": 900},
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
+            **({"proxy": {"server": _proxy_server()}} if _proxy_server() else {}),
         )
         page = ctx.new_page()
         # telecom via airport nodes can return ERR_EMPTY_RESPONSE on some nodes;

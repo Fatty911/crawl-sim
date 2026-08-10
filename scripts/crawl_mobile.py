@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -150,12 +151,26 @@ def contract_desc(name: str, content: str) -> str:
     return ""
 
 
+def proxy_server() -> str | None:
+    """Playwright does not read HTTP_PROXY env vars; pass the mihomo proxy explicitly."""
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        val = (os.environ.get(key) or "").strip()
+        if val and not val.lower().startswith("socks"):
+            return val
+    return None
+
+
 async def run() -> list[dict[str, Any]]:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
-        ctx = await browser.new_context(user_agent=UA, viewport={"width": 1440, "height": 900}, locale="zh-CN")
+        ctx_kwargs: dict = {"user_agent": UA, "viewport": {"width": 1440, "height": 900}, "locale": "zh-CN"}
+        proxy = proxy_server()
+        if proxy:
+            ctx_kwargs["proxy"] = {"server": proxy}
+            print(f"  using proxy for playwright: {proxy}")
+        ctx = await browser.new_context(**ctx_kwargs)
         page = await ctx.new_page()
         await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(20000)
