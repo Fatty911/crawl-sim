@@ -152,6 +152,17 @@ def normalize(raw: dict[str, Any], scope: str, category: str) -> dict[str, Any]:
         else:
             broadband = ""
     service_content = str(detail.get("serviceContent") or "").strip()
+    # fold the numeric traffic/voice facts into service_content so downstream
+    # quality checks and the UI have text evidence (e.g. 臻宽带 1000GB fusion)
+    feature_parts = []
+    if traffic:
+        feature_parts.append(f"通用流量{traffic:g}GB")
+    if orient:
+        feature_parts.append(f"定向流量{orient:g}GB")
+    if voice:
+        feature_parts.append(f"语音{voice:g}分钟")
+    feature_prefix = "、".join(feature_parts)
+    service_content = " ".join(x for x in (feature_prefix, service_content) if x)
     overage = str(detail.get("extraFees") or "").strip()
     return {
         "source": SOURCE,
