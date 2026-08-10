@@ -1,0 +1,93 @@
+name: Deploy Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/deploy-pages.yml'
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@main
+
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Download latest verified Release
+        run: |
+          mkdir -p release
+          for pat in sim-latest.json sim-filtered.json; do
+            gh release download data-latest --repo "$GITHUB_REPOSITORY" --pattern "$pat" --dir release || true
+          done
+
+      - name: Build site
+        run: |
+          rm -rf site
+          mkdir -p site/data site/config
+          cp -R docs/. site/
+          cp config/filter_conditions.json site/config/filter_conditions.json
+          if [ -s release/sim-latest.json ]; then
+            cp release/sim-latest.json site/data/latest.json
+          fi
+          if [ -s release/sim-filtered.json ]; then
+            cp release/sim-filtered.json site/data/filtered.json
+          fi
+          python - <<'PY'
+          import json, os
+          latest_p = 'site/data/latest.json'
+          manifest = {
+              "date": "",
+              "updatedAt": "",
+              "rowCount": 0,
+              "shownCount": 0,
+              "sources": [],
+              "files": {"latestJson": "data/latest.json", "filteredJson": "data/filtered.json"},
+          }
+          if os.path.exists(latest_p):
+              rows = json.load(open(latest_p, encoding='utf-8'))
+              manifest["rowCount"] = len(rows)
+              manifest["shownCount"] = len(rows)
+              manifest["sources"] = sorted({r.get('source') for r in rows})
+          from datetime import datetime, timezone
+          manifest["updatedAt"] = datetime.now(timezone.utc).isoformat()
+          manifest["date"] = datetime.now(timezone.utc).strftime("%Y%m%d")
+          with open('site/data/manifest.json', 'w', encoding='utf-8') as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+          PY
+          touch site/.nojekyll
+
+      - name: Configure Pages
+        uses: actions/configure-pages@main
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@main
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@main

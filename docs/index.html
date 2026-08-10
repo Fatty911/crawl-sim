@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手机套餐资费大全 - 运营商资费爬虫</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>手机套餐资费大全</h1>
+  <p class="subtitle">四大运营商（联通/移动/电信/广电）北京及全国资费，默认展示 <b>通用流量 ≥ 20G 且月租 ≤ 69 元</b> 的套餐及高性价比流量包</p>
+</header>
+
+<div class="toolbar">
+  <div class="filters" id="filters">
+    <label>运营商
+      <select id="f-source"><option value="">全部</option></select>
+    </label>
+    <label>地区
+      <select id="f-region"><option value="">全部</option></select>
+    </label>
+    <label>类型
+      <select id="f-type"><option value="">全部</option></select>
+    </label>
+    <label>月租上限
+      <input type="number" id="f-fee" placeholder="≤ 元" min="0">
+    </label>
+    <label>通用流量下限
+      <input type="number" id="f-traffic" placeholder="≥ GB" min="0">
+    </label>
+  </div>
+  <div class="view-toggle">
+    <button id="btn-default" class="active">默认推荐</button>
+    <button id="btn-all">全部资费</button>
+    <span class="count" id="count"></span>
+  </div>
+</div>
+
+<table id="table">
+  <thead>
+    <tr>
+      <th>运营商</th>
+      <th>套餐名称</th>
+      <th>地区</th>
+      <th>类型</th>
+      <th class="num">月租(元)</th>
+      <th class="num">通用流量</th>
+      <th class="num">定向流量</th>
+      <th class="num">语音(分)</th>
+      <th>备注</th>
+    </tr>
+  </thead>
+  <tbody id="tbody"></tbody>
+</table>
+
+<div class="legend">
+  <span class="tag contract">合约/预存</span> 含购机合约或预存套餐（默认不推荐，可在"全部资费"查看）
+</div>
+
+<footer id="footer"></footer>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+{
+  "schema_version": "sim-filter-v1",
+  "publication_rules": {
+    "exclude_phone_contract": true,
+    "phone_contract_keywords": [
+      "送手机", "购机", "0元购", "合约机", "得电子券", "存费送机",
+      "终端补贴", "手机直降", "预存得", "充话费送"
+    ]
+  },
+  "default_display": {
+    "plan_requirement": {
+      "general_traffic_gb_min": 20,
+      "monthly_fee_max": 69
+    },
+    "data_pack_requirement": {
+      "general_traffic_gb_min": 10,
+      "monthly_fee_max": 30,
+      "max_cny_per_gb": 1.0
+    }
+  },
+  "filter_groups": [
+    {
+      "id": "operator",
+      "label": "运营商",
+      "conditions": [
+        {"id": "source", "label": "运营商", "type": "multi_select", "field": "source", "options": ["中国联通", "中国移动", "中国电信", "中国广电"]}
+      ]
+    },
+    {
+      "id": "region",
+      "label": "地区",
+      "conditions": [
+        {"id": "region", "label": "地区", "type": "multi_select", "field": "region", "options": ["全国", "北京"]}
+      ]
+    },
+    {
+      "id": "plan_type",
+      "label": "类型",
+      "conditions": [
+        {"id": "plan_type", "label": "类型", "type": "multi_select", "field": "plan_type", "options": ["套餐", "流量包"]}
+      ]
+    },
+    {
+      "id": "price_data",
+      "label": "月租/流量",
+      "conditions": [
+        {"id": "fee", "label": "月租上限", "type": "range", "field": "monthly_fee", "unit": "元"},
+        {"id": "traffic", "label": "通用流量下限", "type": "range", "field": "general_traffic_gb", "unit": "GB"},
+        {"id": "orient", "label": "定向流量上限", "type": "range", "field": "orient_traffic_gb", "unit": "GB"}
+      ]
+    }
+  ]
+}

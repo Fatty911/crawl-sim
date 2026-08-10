@@ -1,0 +1,147 @@
+name: Merge and Filter
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制重新合并'
+        required: false
+        default: 'false'
+  workflow_run:
+    workflows: ["Crawl Unicom", "Crawl Broadnet", "Crawl Mobile", "Crawl Telecom"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: merge-and-filter
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@main
+
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Wait for sibling crawler artifacts
+        if: github.event_name == 'workflow_run'
+        run: sleep 45
+
+      - name: Download latest crawler artifacts
+        id: artifacts
+        run: |
+          mkdir -p data/raw/unicom data/raw/broadnet data/raw/mobile data/raw/telecom
+          set +e
+          python scripts/download_latest_crawler_artifact.py \
+            --repo "$GITHUB_REPOSITORY" --workflow crawl-unicom.yml \
+            --artifact-prefix unicom-data- --output data/raw/unicom/latest.json \
+            --min-records 50 2> >(tee "$RUNNER_TEMP/u.err" >&2); u=$?
+          python scripts/download_latest_crawler_artifact.py \
+            --repo "$GITHUB_REPOSITORY" --workflow crawl-broadnet.yml \
+            --artifact-prefix broadnet-data- --output data/raw/broadnet/latest.json \
+            --min-records 20 2> >(tee "$RUNNER_TEMP/b.err" >&2); b=$?
+          python scripts/download_latest_crawler_artifact.py \
+            --repo "$GITHUB_REPOSITORY" --workflow crawl-mobile.yml \
+            --artifact-prefix mobile-data- --output data/raw/mobile/latest.json \
+            --min-records 20 2> >(tee "$RUNNER_TEMP/m.err" >&2); m=$?
+          python scripts/download_latest_crawler_artifact.py \
+            --repo "$GITHUB_REPOSITORY" --workflow crawl-telecom.yml \
+            --artifact-prefix telecom-data- --output data/raw/telecom/latest.json \
+            --min-records 20 2> >(tee "$RUNNER_TEMP/t.err" >&2); t=$?
+          set -e
+          echo "status: unicom=$u broadnet=$b mobile=$m telecom=$t"
+          # require at least 2 sources to publish; others degrade gracefully
+          if [ "$u" -ne 0 ] && [ "$b" -ne 0 ] && [ "$m" -ne 0 ] && [ "$t" -ne 0 ]; then
+            echo "No crawler artifacts available; skipping publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          # stage what we have into data/
+          for src in unicom broadnet mobile telecom; do
+            if [ -s "data/raw/$src/latest.json" ]; then
+              cp "data/raw/$src/latest.json" "data/$src.json"
+              echo "  staged $src"
+            fi
+          done
+
+      - name: Merge and filter
+        if: steps.artifacts.outputs.skip != 'true'
+        run: |
+          mkdir -p dist
+          python scripts/merge_data.py --data-dir data --output dist/merged.json
+          python - <<'PY'
+          import json
+          rows = json.load(open('dist/merged.json', encoding='utf-8'))
+          shown = [r for r in rows if r.get('default_show')]
+          assert len(rows) >= 20, f"merged too small: {len(rows)}"
+          assert len(shown) >= 5, f"default shown too small: {len(shown)}"
+          # manifest
+          from datetime import datetime, timezone
+          manifest = {
+              "date": datetime.now(timezone.utc).strftime("%Y%m%d"),
+              "updatedAt": datetime.now(timezone.utc).isoformat(),
+              "rowCount": len(rows),
+              "shownCount": len(shown),
+              "sources": sorted({r['source'] for r in rows}),
+              "files": {"latestJson": "data/latest.json", "filteredJson": "data/filtered.json"},
+          }
+          with open('dist/manifest.json', 'w', encoding='utf-8') as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+          print(f"merged={len(rows)} shown={len(shown)}")
+          PY
+          # split payloads for Pages
+          python - <<'PY'
+          import json
+          rows = json.load(open('dist/merged.json', encoding='utf-8'))
+          shown = [r for r in rows if r.get('default_show')]
+          json.dump(shown, open('dist/latest.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+          json.dump(rows, open('dist/filtered.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+          print(f"latest.json={len(shown)} filtered.json={len(rows)}")
+          PY
+
+      - name: Publish Release
+        if: steps.artifacts.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          DATE=$(TZ=Asia/Shanghai date +%Y%m%d)
+          git config --local user.email "xuerui911@gmail.com"
+          git config --local user.name "github-actions[bot]"
+          mkdir -p release-assets
+          cp dist/latest.json release-assets/sim-latest.json
+          cp dist/filtered.json release-assets/sim-filtered.json
+          gh release create "data-$DATE" release-assets/sim-*.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "资费数据 $DATE" --notes "四运营商资费爬取合并" || \
+          gh release upload "data-latest" release-assets/sim-*.json \
+            --repo "$GITHUB_REPOSITORY" --clobber || true
+          # maintain a stable data-latest tag pointing at the latest release
+          gh release create data-latest release-assets/sim-*.json \
+            --repo "$GITHUB_REPOSITORY" --title "latest" --notes "latest" 2>/dev/null || \
+          gh release upload data-latest release-assets/sim-*.json \
+            --repo "$GITHUB_REPOSITORY" --clobber || true
+
+      - name: Trigger Pages deploy
+        if: steps.artifacts.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          gh workflow run deploy-pages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"

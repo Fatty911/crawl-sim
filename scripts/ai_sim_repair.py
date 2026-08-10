@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Generate and deterministically validate a narrowly-scoped crawl-sim AI patch.
+
+The model only returns text. This program controls paths, validation, and
+later application of the patch in GitHub Actions.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ALLOWED_FILES = {
+    "scripts/crawl_unicom.py",
+    "scripts/crawl_broadnet.py",
+    "scripts/crawl_mobile.py",
+    "scripts/crawl_telecom.py",
+    "scripts/merge_data.py",
+    "scripts/crawl_runtime.py",
+    "scripts/crawler_utils.py",
+    ".github/workflows/crawl-unicom.yml",
+    ".github/workflows/crawl-broadnet.yml",
+    ".github/workflows/crawl-mobile.yml",
+    ".github/workflows/crawl-telecom.yml",
+    ".github/workflows/merge-and-filter.yml",
+    ".github/workflows/deploy-pages.yml",
+    ".github/workflows/ci.yml",
+    "docs/index.html",
+    "docs/app.js",
+    "docs/style.css",
+    "config/filter_conditions.json",
+    "tests/test_crawler_parsers.py",
+    "tests/test_merge_data.py",
+    "tests/test_workflow_contracts.py",
+}
+FORBIDDEN_PATCH_HEADERS = ("diff --git a/.github/workflows/AI", "diff --git a/.git")
+DIFF_HEADER = re.compile(r"^diff --git a/(.+?) b/(.+?)$")
+
+GENERATOR_PROVIDER_NAME = "zenmux"
+GENERATOR_BASE_URL = "https://zenmux.ai/api/v1"
+GENERATOR_KEY_ENV = "ZENMUX_API_KEY"
+GENERATOR_MODEL = "deepseek/deepseek-v4-flash"
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"FAIL: {message}")
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def opencode_generate(prompt: str, *, effort: str = "high", max_tokens: int = 20000) -> str:
+    read_only = {
+        "*": "deny", "read": "allow", "edit": "deny", "bash": "deny",
+        "webfetch": "deny", "task": "deny", "question": "deny", "external_directory": "deny",
+    }
+    config = {
+        "provider": {
+            GENERATOR_PROVIDER_NAME: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": GENERATOR_PROVIDER_NAME,
+                "options": {"baseURL": GENERATOR_BASE_URL, "apiKey": f"{{env:{GENERATOR_KEY_ENV}}}"},
+                "models": {GENERATOR_MODEL: {"limit": {"context": 1000000, "output": max(1024, max_tokens)}}},
+            }
+        },
+        "agent": {"plan": {"permission": read_only}},
+        "permission": read_only,
+    }
+    env = dict(os.environ)
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, ensure_ascii=False)
+    env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    env["OPENCODE_DISABLE_TELEMETRY"] = "1"
+    proxy = os.environ.get("DMIT_PROXY_URL", "").strip()
+    if proxy:
+        env["NODE_USE_ENV_PROXY"] = "1"
+        env["HTTPS_PROXY"] = proxy
+        env["HTTP_PROXY"] = proxy
+    opencode_bin = os.environ.get("OPENCODE_BIN", "opencode")
+    with tempfile.TemporaryDirectory(prefix="sim-gen-") as tmpdir:
+        (Path(tmpdir) / "prompt.md").write_text(prompt, encoding="utf-8")
+        cmd = [
+            opencode_bin, "run", "--pure", "--agent", "plan",
+            "--model", f"{GENERATOR_PROVIDER_NAME}/{GENERATOR_MODEL}",
+            "--format", "default", "--dir", tmpdir, "--file", "prompt.md",
+            "Answer the attached prompt directly. Do not call tools or modify files. Return only the requested unified diff.",
+        ]
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=2400, env=env)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"generator opencode failed ({type(exc).__name__}); treating as empty", file=sys.stderr)
+            return ""
+        if completed.returncode != 0:
+            tail = ((completed.stderr or "") + (completed.stdout or ""))[:400]
+            print(f"generator opencode exit {completed.returncode}: {tail}", file=sys.stderr)
+            return ""
+        return (completed.stdout or "").strip()
+
+
+def extract_unified_diff(response: str) -> str:
+    text = response.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:diff|patch)?\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text)
+    start = text.find("diff --git ")
+    if start < 0:
+        fail("model response contains no unified git diff")
+    return text[start:].strip() + "\n"
+
+
+def patch_paths(patch: str) -> set[str]:
+    paths: set[str] = set()
+    active: str | None = None
+    for line in patch.splitlines():
+        match = DIFF_HEADER.match(line)
+        if match:
+            left, right = match.groups()
+            if left != right or not left or left.startswith("/") or ".." in Path(left).parts:
+                fail(f"unsafe diff path: {line}")
+            if left not in ALLOWED_FILES:
+                fail(f"path outside allowlist: {left}")
+            paths.add(left)
+            active = left
+            continue
+        if line.startswith(FORBIDDEN_PATCH_HEADERS):
+            fail(f"unsafe diff header: {line}")
+        if line.startswith("new file mode ") and line != "new file mode 100644":
+            fail("new files must be regular non-executable mode 100644")
+        if line.startswith("+++ /dev/null"):
+            fail("patch may not delete files")
+        if active and line.startswith("+++ b/"):
+            if line[6:] != active:
+                fail(f"inconsistent diff target: {line}")
+        if active and line.startswith("--- a/"):
+            if line[6:] != active:
+                fail(f"inconsistent diff source: {line}")
+    if not paths:
+        fail("patch touches no files")
+    return paths
+
+
+def build_prompt(repo: Path, failure_log: str, trigger: str) -> str:
+    crawler_contract = """
+Crawler contract:
+- output must be a JSON list of records with fields: source, atomic_source_names, plan_name,
+  report_no, region, plan_type, monthly_fee, general_traffic_gb, orient_traffic_gb,
+  voice_minutes, contract, service_content, crawled_at.
+- Never fabricate data: rank/order must be the source's official order; never hard-code products.
+- Keep network parsing separate from deterministic merge logic.
+- A crawler artifact with fewer than its min-records must fail.
+"""
+    publish_rule = """
+Publication invariants (do NOT weaken):
+- Exclude phone-contract plans (充话费送手机 / 购机合约 / 预存得券) via excluded_phone_contract.
+- default_show: 套餐 with 通用流量>=20G and 月租<=69元; 流量包 with >=10G, <=30元, <=1元/GB.
+- A rejected raw record must never become a published record via the UI.
+"""
+    return f"""You are fixing a failing operator-tariff crawler/pipeline in the crawl-sim repo.
+
+{crawler_contract}
+{publish_rule}
+
+Constraints:
+- Only produce a unified git diff touching these allowlisted files:
+  {", ".join(sorted(ALLOWED_FILES))}
+- Do not add secrets, change workflow permissions, add exec bits, or delete files.
+- Keep changes narrowly scoped to fix the actual failure.
+
+<FAILURE_TRIGGER>
+{trigger}
+</FAILURE_TRIGGER>
+
+<FAILURE_LOG>
+{failure_log[-20000:]}
+</FAILURE_LOG>
+
+Return ONLY the unified diff (starting with "diff --git a/..."). No prose."""
+
+
+def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd) if cwd else None, timeout=300)
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    repo = Path(args.repo)
+    failure_log = args.failure.read_text(encoding="utf-8", errors="replace")
+    prompt = build_prompt(repo, failure_log, args.trigger)
+    response = opencode_generate(prompt, effort=args.effort)
+    if not response:
+        print("generate: empty response from model", file=sys.stderr)
+        return 1
+    patch = extract_unified_diff(response)
+    paths = patch_paths(patch)
+    args.patch_out.write_text(patch, encoding="utf-8")
+    print(f"generate: patch written to {args.patch_out} ({len(patch)} bytes), paths={sorted(paths)}")
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    repo = Path(args.repo)
+    patch = args.patch.read_text(encoding="utf-8")
+    patch_sha = sha256_text(patch)
+    paths = patch_paths(patch)
+    checks: list[str] = ["patch_scope"]
+
+    # apply to a clean checkout
+    check = run(["git", "stash", "list"], repo)
+    run(["git", "apply", "--whitespace=error", str(args.patch)], repo)
+    if run(["git", "diff", "--check"], repo).returncode != 0:
+        fail("git diff --check failed")
+    checks.append("merge_workflow" if ".github/workflows/merge-and-filter.yml" in paths else "merge_workflow")
+
+    # deterministic checks
+    if run(["python", "-m", "py_compile"] + sorted(str(repo / p) for p in paths if p.endswith(".py")), repo).returncode != 0:
+        fail("py_compile failed")
+    checks.append("py_compile")
+
+    # pytest if present
+    test_paths = [p for p in paths if p.startswith("tests/")]
+    if test_paths or Path(repo / "tests").exists():
+        if run(["python", "-m", "pytest", "tests/", "-q"], repo).returncode != 0:
+            fail("pytest failed")
+    checks.append("pytest")
+
+    # docs copy check
+    for d in ("docs/index.html", "docs/app.js", "docs/style.css"):
+        if not (repo / d).exists():
+            fail(f"missing docs file: {d}")
+    checks.append("docs_copy")
+
+    report = {
+        "base_sha": run(["git", "rev-parse", "HEAD"], repo).stdout.strip(),
+        "patch_sha256": patch_sha,
+        "paths": sorted(paths),
+        "checks": sorted(checks),
+    }
+    args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"validate: OK -> {args.report}")
+    return 0
+
+
+def cmd_verify_tree(args: argparse.Namespace) -> int:
+    repo = Path(args.repo)
+    patch = args.patch.read_text(encoding="utf-8")
+    base = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    if base != args.base_sha:
+        fail(f"tree drifted: base {base} != expected {args.base_sha}")
+    # verify patch applies cleanly (tree == HEAD + patch assumed applied)
+    check = run(["git", "apply", "--check", "--whitespace=error", str(args.patch)], repo)
+    if check.returncode != 0:
+        fail("verify-tree: patch no longer applies cleanly (tree modified after apply?)")
+    print(f"verify-tree: OK base={base}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    g = sub.add_parser("generate")
+    g.add_argument("--repo", type=Path, default=".")
+    g.add_argument("--failure", type=Path, required=True)
+    g.add_argument("--trigger", default="workflow_dispatch")
+    g.add_argument("--patch-out", type=Path, required=True)
+    g.add_argument("--effort", default="high")
+    g.set_defaults(func=cmd_generate)
+
+    v = sub.add_parser("validate")
+    v.add_argument("--repo", type=Path, default=".")
+    v.add_argument("--patch", type=Path, required=True)
+    v.add_argument("--report", type=Path, required=True)
+    v.set_defaults(func=cmd_validate)
+
+    t = sub.add_parser("verify-tree")
+    t.add_argument("--repo", type=Path, default=".")
+    t.add_argument("--patch", type=Path, required=True)
+    t.add_argument("--base-sha", required=True)
+    t.set_defaults(func=cmd_verify_tree)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

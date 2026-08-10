@@ -1,0 +1,85 @@
+name: Crawl Mobile
+
+on:
+  workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: '调试模式（小数据量验证）'
+        required: false
+        default: 'false'
+  schedule:
+    - cron: "49 3 * * *"
+    - cron: "49 9 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-crawl
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@main
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install playwright==1.61.0
+
+      - name: Install chromium (matching playwright 1.61 build)
+        run: python -m playwright install chromium-headless-shell
+
+      - name: Configure required crawler proxy (mihomo round-robin)
+        env:
+          PROXY_SUBSCRIPTIONS: ${{ secrets.PROXY_SUBSCRIPTIONS }}
+        run: >-
+          python scripts/setup_proxy_runtime.py
+          --require-proxy
+          --test-url https://h.app.coc.10086.cn/cmcc-app/pc-pages/tariffZonePers.html
+
+      - name: Crawl Mobile tariffs
+        run: >-
+          python scripts/crawl_mobile.py
+          --output data/mobile.json
+          --min-records ${{ github.event.inputs.debug_mode == 'true' && '10' || '60' }}
+
+      - name: Verify output
+        run: |
+          python - <<'PY'
+          import json
+          rows = json.load(open('data/mobile.json', encoding='utf-8'))
+          assert len(rows) >= 10, f"too few rows: {len(rows)}"
+          assert all(r.get('source') == '中国移动' for r in rows)
+          print(f"OK: {len(rows)} Mobile rows")
+          PY
+
+      - name: Clear crawler proxy
+        if: always()
+        run: python scripts/setup_proxy_runtime.py --clear
+
+      - name: Upload Mobile artifact
+        uses: actions/upload-artifact@main
+        with:
+          name: mobile-data-${{ github.run_id }}
+          path: data/mobile.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Trigger merge
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run merge-and-filter.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            -f trigger_source=mobile-crawl -f crawler_run_id=${{ github.run_id }}

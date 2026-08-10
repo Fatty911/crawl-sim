@@ -1,0 +1,56 @@
+:root {
+  --accent: #0d6efd;
+  --bg: #f5f6fa;
+  --card: #fff;
+  --border: #e3e6ee;
+  --text: #1f2430;
+  --muted: #6b7280;
+  --warn: #b45309;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.5;
+}
+header { background: linear-gradient(135deg, #0d6efd, #4f46e5); color: #fff; padding: 24px 20px; }
+header h1 { margin: 0 0 6px; font-size: 24px; }
+header .subtitle { margin: 0; font-size: 13px; opacity: .92; }
+.toolbar {
+  background: var(--card); border-bottom: 1px solid var(--border);
+  padding: 14px 20px; display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+  position: sticky; top: 0; z-index: 10;
+}
+.filters { display: flex; flex-wrap: wrap; gap: 14px; }
+.filters label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 4px; }
+.filters select, .filters input {
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: #fff;
+}
+.view-toggle { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.view-toggle button {
+  border: 1px solid var(--border); background: #fff; padding: 7px 14px; border-radius: 6px;
+  cursor: pointer; font-size: 13px;
+}
+.view-toggle button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.view-toggle .count { font-size: 13px; color: var(--muted); }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; background: var(--card); font-size: 13px; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--border); text-align: left; }
+th { background: #fafbfc; color: var(--muted); font-weight: 600; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: #f7f9ff; }
+.src-联通 { color: #e60027; }
+.src-移动 { color: #0066b3; }
+.src-电信 { color: #e8730c; }
+.src-广电 { color: #8b5cf6; }
+.tag {
+  display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 4px;
+}
+.tag.contract { background: #fef3c7; color: var(--warn); }
+.tag.pack { background: #e0f2fe; color: #0369a1; }
+.tag.bj { background: #ede9fe; color: #6d28d9; }
+.legend { padding: 12px 20px; font-size: 12px; color: var(--muted); }
+footer { padding: 16px 20px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
+.empty { text-align: center; color: var(--muted); padding: 40px; }
+@media (max-width: 720px) {
+  th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) { display: none; }
+}

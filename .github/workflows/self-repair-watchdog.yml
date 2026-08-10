@@ -1,0 +1,93 @@
+name: Self-Repair Watchdog
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+
+concurrency:
+  group: self-repair-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@main
+        with:
+          persist-credentials: false
+
+      - name: Detect recent crawler failures and trigger AI repair
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python - <<'PYEOF'
+          import json, os, subprocess, datetime
+
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          crawler_wfs = ["crawl-unicom.yml", "crawl-broadnet.yml", "crawl-mobile.yml", "crawl-telecom.yml",
+                         "merge-and-filter.yml", "deploy-pages.yml"]
+          now = datetime.datetime.now(datetime.timezone.utc)
+          failed = []
+          for wf in crawler_wfs:
+              out = subprocess.run(
+                  ["gh", "run", "list", "--repo", repo, "--workflow", wf,
+                   "--limit", "8", "--json", "databaseId,status,conclusion,createdAt,updatedAt"],
+                  capture_output=True, text=True, timeout=60,
+              )
+              if out.returncode != 0:
+                  continue
+              for run in json.loads(out.stdout or "[]"):
+                  if run.get("conclusion") in ("failure", "cancelled"):
+                      created = datetime.datetime.fromisoformat(run["createdAt"].replace("Z", "+00:00"))
+                      # only recent failures in the last 12h
+                      if (now - created).total_seconds() < 43200:
+                          failed.append((wf, run["databaseId"], run["conclusion"]))
+              break  # just check the most recent run per workflow below
+
+          # fallback: single list check
+          if not failed:
+              out = subprocess.run(
+                  ["gh", "run", "list", "--repo", repo, "--limit", "30",
+                   "--json", "databaseId,conclusion,createdAt,workflowName"],
+                  capture_output=True, text=True, timeout=60,
+              )
+              for run in json.loads(out.stdout or "[]"):
+                  name = (run.get("workflowName") or "")
+                  if name and ("Crawl" in name or "Merge" in name or "Deploy" in name) and \
+                     run.get("conclusion") in ("failure", "cancelled"):
+                      created = datetime.datetime.fromisoformat(run["createdAt"].replace("Z", "+00:00"))
+                      if (now - created).total_seconds() < 43200:
+                          failed.append((name, run["databaseId"], run["conclusion"]))
+
+          if not failed:
+              print("watchdog: no recent crawler failures")
+              raise SystemExit(0)
+
+          print("watchdog: recent failures ->", failed)
+          # ensure ai-sim-repair not already running / frozen
+          frozen = subprocess.run(
+              ["gh", "issue", "list", "--repo", repo, "--state", "open", "--label", "ai-sim-frozen",
+               "--json", "number"], capture_output=True, text=True, timeout=60)
+          if json.loads(frozen.stdout or "[]"):
+              print("watchdog: repair frozen, not dispatching")
+              raise SystemExit(0)
+          running = subprocess.run(
+              ["gh", "run", "list", "--repo", repo, "--workflow", "ai-sim-repair.yml",
+               "--limit", "3", "--json", "status"], capture_output=True, text=True, timeout=60)
+          if any(r.get("status") == "in_progress" for r in json.loads(running.stdout or "[]")):
+              print("watchdog: repair already running")
+              raise SystemExit(0)
+          subprocess.run(
+              ["gh", "workflow", "run", "ai-sim-repair.yml", "--repo", repo, "--ref", "main", "-f", "attempt=1"],
+              capture_output=True, text=True, timeout=60)
+          print("watchdog: dispatched ai-sim-repair (attempt=1)")
+          PYEOF

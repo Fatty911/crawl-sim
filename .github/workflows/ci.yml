@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@main
+
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m py_compile scripts/*.py
+
+      - name: Validate workflow syntax
+        run: python scripts/validate_syntax.py .github/workflows/*.yml
+
+      - name: Run tests
+        run: |
+          if [ -d tests ]; then
+            python -m pytest tests/ -q 2>/dev/null || python -m unittest discover -s tests -q
+          else
+            echo "no tests dir"
+          fi
+
+      - name: Smoke merge
+        run: |
+          python - <<'PY'
+          # ensure merge logic runs against synthetic minimal data
+          import json, os, tempfile
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, '.')
+          from scripts.merge_data import classify
+          sample = {
+              "source": "中国联通", "plan_name": "测试套餐", "report_no": "T1",
+              "region": "全国", "plan_type": "套餐",
+              "monthly_fee": 59, "general_traffic_gb": 30,
+              "orient_traffic_gb": 0, "voice_minutes": 100, "sms": 0,
+              "contract": False, "service_content": "", "contract_desc": ""
+          }
+          out = classify(sample)
+          assert out["default_show"] is True, out
+          sample2 = dict(sample)
+          sample2.update({"plan_name": "送手机合约", "monthly_fee": 129, "contract": True})
+          out2 = classify(sample2)
+          assert out2["default_show"] is False
+          assert out2["excluded_phone_contract"] is True
+          print("merge classify OK")
+          PY

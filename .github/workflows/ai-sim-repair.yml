@@ -1,0 +1,280 @@
+name: AI Repair Sim
+
+on:
+  workflow_dispatch:
+    inputs:
+      attempt:
+        description: "Bounded repair attempt (1 or 2)"
+        required: true
+        default: "1"
+        type: choice
+        options: ["1", "2"]
+
+permissions: {}
+
+concurrency:
+  group: ai-sim-repair
+  cancel-in-progress: false
+
+jobs:
+  freeze_check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    outputs:
+      frozen: ${{ steps.freeze.outputs.frozen }}
+    steps:
+      - id: freeze
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state open --label ai-sim-frozen \
+              --limit 1 --json number --jq 'length > 0' | grep -qx true; then
+            echo "frozen=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frozen=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  generate:
+    needs: freeze_check
+    if: needs.freeze_check.outputs.frozen != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - uses: actions/setup-node@main
+        with:
+          node-version: "22"
+      - name: Install OpenCode CLI
+        run: npm install --global opencode-ai@latest
+      - name: Prepare failure log
+        run: |
+          printf 'crawl-sim pipeline failure. Trigger: manual AI repair (attempt %s).\nReview the crawler/merge scripts and workflow files to identify and fix the fault.\n' "${{ inputs.attempt }}" > failure.md
+      - name: Generate constrained patch
+        env:
+          ZENMUX_API_KEY: ${{ secrets.ZENMUX_API_KEY }}
+          DMIT_PROXY_URL: ${{ secrets.DMIT_PROXY_URL }}
+        run: >-
+          python scripts/ai_sim_repair.py generate
+          --repo .
+          --failure failure.md
+          --trigger "manual sim repair"
+          --patch-out "$RUNNER_TEMP/sim.patch"
+      - uses: actions/upload-artifact@main
+        with:
+          name: sim-ai-patch-${{ github.run_id }}
+          path: ${{ runner.temp }}/sim.patch
+          if-no-files-found: error
+          retention-days: 7
+
+  validate:
+    needs: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@main
+        with:
+          name: sim-ai-patch-${{ github.run_id }}
+          path: ${{ runner.temp }}
+      - name: Preserve trusted guard outside candidate tree
+        run: cp scripts/ai_sim_repair.py "$RUNNER_TEMP/trusted-ai-sim-repair.py"
+      - name: Validate patch
+        run: >-
+          python scripts/ai_sim_repair.py validate
+          --repo .
+          --patch "$RUNNER_TEMP/sim.patch"
+          --report "$RUNNER_TEMP/sim-validation.json"
+      - name: Verify exact tree
+        run: >-
+          python "$RUNNER_TEMP/trusted-ai-sim-repair.py" verify-tree
+          --repo . --patch "$RUNNER_TEMP/sim.patch" --base-sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@main
+        if: always()
+        with:
+          name: sim-validation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sim.patch
+            ${{ runner.temp }}/sim-validation.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  review:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - uses: actions/setup-node@main
+        with:
+          node-version: "22"
+      - name: Install OpenCode CLI
+        run: npm install --global opencode-ai@latest
+      - uses: actions/download-artifact@main
+        with:
+          name: sim-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}
+      - name: DeepSeek V4 Flash final review
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+          DMIT_PROXY_URL: ${{ secrets.DMIT_PROXY_URL }}
+        run: >-
+          python scripts/ai_patch_review.py
+          --patch "$RUNNER_TEMP/sim.patch"
+          --validation "$RUNNER_TEMP/sim-validation.json"
+          --output "$RUNNER_TEMP/sim-review.json"
+      - uses: actions/upload-artifact@main
+        with:
+          name: sim-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/sim-review.json
+          if-no-files-found: error
+          retention-days: 14
+
+  final_validate:
+    needs: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@main
+        with:
+          name: sim-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/validated
+      - uses: actions/download-artifact@main
+        with:
+          name: sim-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/reviewed
+      - name: Bind reviewer result to exact tested diff
+        env:
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          python - "$RUNNER_TEMP/validated/sim.patch" "$RUNNER_TEMP/validated/sim-validation.json" "$RUNNER_TEMP/reviewed/sim-review.json" <<'PY'
+          import hashlib, json, os, sys
+          patch = open(sys.argv[1], "rb").read(50_000_001)
+          assert len(patch) <= 50_000_000
+          validation = json.load(open(sys.argv[2], "rb").read(1_000_001))
+          review = json.load(open(sys.argv[3], "rb").read(1_000_001))
+          digest = hashlib.sha256(patch).hexdigest()
+          assert validation["base_sha"] == os.environ["BASE_SHA"]
+          assert validation["patch_sha256"] == digest == review["patch_sha256"]
+          assert review["review"]["verdict"] == "PASS"
+          PY
+
+  finalize:
+    needs: final_validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@main
+        with:
+          name: sim-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/validated
+      - uses: actions/download-artifact@main
+        with:
+          name: sim-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/reviewed
+      - name: Apply exact reviewed patch
+        run: |
+          git apply --check --whitespace=error "$RUNNER_TEMP/validated/sim.patch"
+          git apply --whitespace=error "$RUNNER_TEMP/validated/sim.patch"
+          git diff --check
+      - name: Commit and push
+        env:
+          ACTION_PAT: ${{ secrets.ACTION_PAT }}
+        run: |
+          set -euo pipefail
+          git config user.name "Fatty911"
+          git config user.email "xuerui911@gmail.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: AI self-repair for operator tariff pipeline"
+          original_url=$(git remote get-url origin)
+          trap 'git remote set-url origin "$original_url"' EXIT
+          test -n "$ACTION_PAT"
+          git remote set-url origin "https://x-access-token:${ACTION_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin HEAD:main
+          git remote set-url origin "$original_url"
+          trap - EXIT
+      - name: Dispatch crawlers to verify
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          gh workflow run crawl-unicom.yml --repo "$GITHUB_REPOSITORY" --ref main || true
+          gh workflow run crawl-broadnet.yml --repo "$GITHUB_REPOSITORY" --ref main || true
+
+  follow-up:
+    needs: [freeze_check, generate, validate, review, final_validate, finalize]
+    if: always() && needs.freeze_check.outputs.frozen != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      issues: write
+    steps:
+      - name: Dispatch one bounded retry or freeze
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ inputs.attempt }}
+          GENERATE: ${{ needs.generate.result }}
+          VALIDATE: ${{ needs.validate.result }}
+          REVIEW: ${{ needs.review.result }}
+          FINAL_VALIDATE: ${{ needs.final_validate.result }}
+          FINALIZE: ${{ needs.finalize.result }}
+        run: |
+          set -euo pipefail
+          if [ "$GENERATE/$VALIDATE/$REVIEW/$FINAL_VALIDATE/$FINALIZE" = "success/success/success/success/success" ]; then
+            exit 0
+          fi
+          if [ "$ATTEMPT" = "1" ]; then
+            gh workflow run ai-sim-repair.yml --repo "$GITHUB_REPOSITORY" --ref main -f attempt=2
+            exit 0
+          fi
+          gh label create ai-sim-frozen --repo "$GITHUB_REPOSITORY" --color B60205 --description "AI sim repair exhausted its bounded attempts" 2>/dev/null || true
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "AI sim repair frozen after two attempts" \
+            --label ai-sim-frozen \
+            --body "Run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID stopped after two bounded attempts. Results: generate=$GENERATE validate=$VALIDATE review=$REVIEW final_validate=$FINAL_VALIDATE finalize=$FINALIZE."
