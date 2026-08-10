@@ -26,6 +26,7 @@ ALLOWED_FILES = {
     "scripts/crawl_mobile.py",
     "scripts/crawl_telecom.py",
     "scripts/merge_data.py",
+    "scripts/verify_pages_ui.py",
     "scripts/crawl_runtime.py",
     "scripts/crawler_utils.py",
     ".github/workflows/crawl-unicom.yml",

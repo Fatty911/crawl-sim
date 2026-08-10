@@ -58,8 +58,18 @@ jobs:
       - name: Install OpenCode CLI
         run: npm install --global opencode-ai@latest
       - name: Prepare failure log
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          printf 'crawl-sim pipeline failure. Trigger: manual AI repair (attempt %s).\nReview the crawler/merge scripts and workflow files to identify and fix the fault.\n' "${{ inputs.attempt }}" > failure.md
+          ISSUE_BODY=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label sim-pages-verify-failed --json number,title,body --jq '.[0].body // ""' 2>/dev/null || true)
+          if [ -n "$ISSUE_BODY" ]; then
+            printf 'Pages 部署后校验失败报告（来自 sim-pages-verify-failed issue）：\n%s\n' "$ISSUE_BODY" > failure.md
+            echo "failure log from pages-verify issue"
+          else
+            printf 'crawl-sim pipeline failure. Trigger: AI repair (attempt %s).\nReview the crawler/merge/workflow files to identify and fix the fault.\n' "${{ inputs.attempt }}" > failure.md
+            echo "generic failure log"
+          fi
       - name: Generate constrained patch
         env:
           ZENMUX_API_KEY: ${{ secrets.ZENMUX_API_KEY }}

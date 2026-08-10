@@ -91,3 +91,63 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@main
+
+  verify:
+    needs: deploy
+    if: always() && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@main
+
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies + playwright (pinned like crawlers)
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install playwright==1.61.0
+          python -m playwright install chromium-headless-shell
+
+      - name: Verify deployed page and data expectations
+        id: verify
+        run: >-
+          python scripts/verify_pages_ui.py
+          --output "$RUNNER_TEMP/pages-verify-report.json"
+
+      - uses: actions/upload-artifact@main
+        if: always()
+        with:
+          name: pages-verify-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/pages-verify-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Open verification-failed issue
+        if: failure() && steps.verify.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          gh label create sim-pages-verify-failed --repo "$GITHUB_REPOSITORY" \
+            --color FBCA04 --description "Pages 部署后数据/UI 校验失败" 2>/dev/null || true
+          # close any stale open issue of this kind first
+          OLD=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                --label sim-pages-verify-failed --json number --jq '.[].number' | head -1)
+          if [ -n "$OLD" ]; then gh issue close "$OLD" --repo "$GITHUB_REPOSITORY" || true; fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "Pages 校验失败: ${{ github.run_id }}" \
+            --label sim-pages-verify-failed \
+            --body "$(cat "$RUNNER_TEMP/pages-verify-report.json")"
+
+      - name: Trigger bounded AI self-repair
+        if: failure() && steps.verify.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          gh workflow run ai-sim-repair.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f attempt=1 || echo "repair dispatch failed (non-blocking)"

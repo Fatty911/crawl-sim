@@ -103,7 +103,17 @@ def parse_card(text: str) -> dict[str, Any] | None:
 
     if not name:
         return None
-    service_content = " ".join(x for x in (content, others) if x)
+    # fold the DOM table numbers into service_content so downstream quality
+    # checks and the UI have the traffic/voice evidence in text form
+    feature_parts = []
+    if traffic:
+        feature_parts.append(f"国内通用流量{traffic:g}GB")
+    if orient:
+        feature_parts.append(f"定向流量{orient:g}GB")
+    if voice:
+        feature_parts.append(f"国内通话{voice:g}分钟")
+    feature_prefix = "、".join(feature_parts)
+    service_content = " ".join(x for x in (feature_prefix, content, others) if x)
     return {
         "source": SOURCE,
         "atomic_source_names": [SOURCE_SHORT],
