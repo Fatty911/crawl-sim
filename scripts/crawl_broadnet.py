@@ -115,10 +115,13 @@ def normalize(raw: dict[str, Any], region: str) -> dict[str, Any]:
     name = str(raw.get("productName") or "").strip()
     fee = _num(raw.get("productPrice"))  # unit: 分
     fee_unit = str(raw.get("productPriceUnit") or "月").strip()
-    # productPrice is in cents; convert to yuan for monthly plans
+    # productPrice is in cents; convert to yuan. Yearly products become monthly average.
     fee_yuan = None
     if fee is not None:
-        fee_yuan = round(fee / 100, 2) if fee_unit == "月" else round(fee / 100, 2)
+        if fee_unit == "年":
+            fee_yuan = round(fee / 100 / 12, 2)
+        else:
+            fee_yuan = round(fee / 100, 2)
     traffic = _num(raw.get("domesticTraffic"))
     orient = _num(raw.get("orientTraffic"))
     voice = _num(raw.get("domesticCall"))

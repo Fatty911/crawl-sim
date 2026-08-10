@@ -110,7 +110,7 @@ def parse_card(text: str) -> dict[str, Any] | None:
         "plan_name": name,
         "report_no": report_no,
         "region": "全国" if "全网" in text else "北京",
-        "plan_type": "流量包" if "加装" in plan_type or "包" in plan_type and "套餐" not in plan_type else "套餐",
+        "plan_type": "流量包" if re.search(r"(?<!含)(?:流量包|加量包|流量月包|加油包|流量年包|日租包|周包|小时包)", name) else "套餐",
         "monthly_fee": fee,
         "fee_text": fee_text,
         "general_traffic_gb": traffic,

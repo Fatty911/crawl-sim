@@ -129,12 +129,12 @@ def normalize(raw: dict[str, Any], scope: str, category: str) -> dict[str, Any]:
     traffic = None
     m = re.search(r"(\d+(?:\.\d+)?)", traffic_text)
     if m:
-        traffic = float(m.group(1))
+        traffic = _to_gb(float(m.group(1)), str(detail.get("dataUnit") or "GB"))
     orient_text = str(detail.get("orientTraffic") or "").strip()
     orient = None
     m = re.search(r"(\d+(?:\.\d+)?)", orient_text)
     if m:
-        orient = float(m.group(1))
+        orient = _to_gb(float(m.group(1)), str(detail.get("orientTrafficUnit") or "GB"))
     voice_text = str(detail.get("minute") or "").strip()
     voice = None
     m = re.search(r"(\d+(?:\.\d+)?)", voice_text)
@@ -174,6 +174,18 @@ def _to_float(value: Any) -> float | None:
         return float(str(value or "").strip() or 0)
     except ValueError:
         return None
+
+
+def _to_gb(value: float, unit: str) -> float:
+    """Normalize a traffic amount to GB, honoring the source's unit field."""
+    unit = (unit or "GB").strip().upper()
+    if unit in ("MB", "M"):
+        return round(value / 1024, 2)
+    if unit in ("KB", "K"):
+        return round(value / 1024 / 1024, 4)
+    if unit in ("TB", "T"):
+        return round(value * 1024, 2)
+    return round(value, 2)
 
 
 CONTRACT_KEYWORDS = [

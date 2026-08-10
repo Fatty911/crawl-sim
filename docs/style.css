@@ -36,6 +36,10 @@ header .subtitle { margin: 0; font-size: 13px; opacity: .92; }
 table { width: 100%; border-collapse: collapse; background: var(--card); font-size: 13px; }
 th, td { padding: 10px 12px; border-bottom: 1px solid var(--border); text-align: left; }
 th { background: #fafbfc; color: var(--muted); font-weight: 600; white-space: nowrap; }
+th[data-sort] { cursor: pointer; user-select: none; }
+th[data-sort]:hover { background: #eef2ff; color: var(--accent); }
+th.sorted { color: var(--accent); }
+th .sort-badge { font-size: 10px; color: var(--accent); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tbody tr:hover { background: #f7f9ff; }
 .src-联通 { color: #e60027; }
@@ -46,8 +50,32 @@ tbody tr:hover { background: #f7f9ff; }
   display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 4px;
 }
 .tag.contract { background: #fef3c7; color: var(--warn); }
+.tag.restricted { background: #fce7f3; color: #be185d; }
 .tag.pack { background: #e0f2fe; color: #0369a1; }
 .tag.bj { background: #ede9fe; color: #6d28d9; }
+.sort-panel {
+  background: var(--card); border-bottom: 1px solid var(--border); padding: 10px 20px;
+  display: flex; flex-direction: column; gap: 8px; font-size: 13px;
+}
+.sort-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sort-panel-head .sort-hint { color: var(--muted); font-size: 12px; flex: 1; }
+.sort-panel-head button, .sort-key-row button {
+  border: 1px solid var(--border); background: #fff; padding: 5px 10px; border-radius: 6px;
+  cursor: pointer; font-size: 12px;
+}
+.sort-panel-head button { background: var(--accent); color: #fff; border-color: var(--accent); }
+.sort-panel-head button.ghost { background: #fff; color: var(--text); border-color: var(--border); }
+.sort-keys { display: flex; flex-direction: column; gap: 6px; }
+.sort-key-row { display: flex; align-items: center; gap: 8px; }
+.sort-key-row .sort-idx {
+  width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+}
+.sort-key-row select {
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; background: #fff;
+}
+.sort-key-row .sort-del { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
+.sort-empty { color: var(--muted); font-size: 12px; }
 .legend { padding: 12px 20px; font-size: 12px; color: var(--muted); }
 footer { padding: 16px 20px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
 .empty { text-align: center; color: var(--muted); padding: 40px; }

@@ -94,14 +94,80 @@ def has_strong_contract(row: dict[str, Any]) -> bool:
     return False
 
 
+RESTRICTED_PATTERNS = [
+    r"成长计划",
+    r"档及以上",
+    r"及以上档位",
+    r"以上档位用户",
+    r"限[^，。；（）]{0,10}(?:用户|客户|套餐|档)",
+    r"专属",
+    r"专享",
+    r"需[^，。；]{0,12}套餐",
+    r"校园",
+    r"学生",
+    r"特定用户",
+    r"副卡办理",
+    r"(?:仅限|限于|限定)[^，。；（）]{0,8}(?:用户|客户)",
+]
+
+
+def is_restricted(row: dict[str, Any]) -> bool:
+    """True if the plan has an ordering threshold (main-plan tier / campus / exclusive).
+
+    Only the plan name and use_scope are inspected: service_content contains
+    marketing prose ("仅限新入网用户", "可办理副卡") that is NOT an ordering gate.
+    """
+    name = str(row.get("plan_name") or "")
+    use_scope = str(row.get("use_scope") or row.get("适用范围") or "")
+    text = f"{name} {use_scope}"
+    for pattern in RESTRICTED_PATTERNS:
+        if re.search(pattern, text):
+            return True
+    return False
+
+
+def fix_region(row: dict[str, Any]) -> dict[str, Any]:
+    """Refine region from the plan name's province mark (e.g. 畅越…（北京）)."""
+    out = dict(row)
+    name = str(out.get("plan_name") or "")
+    m = re.search(r"（(北京|上海|广东|深圳|天津|重庆)）", name)
+    if m and out.get("region") == "全国":
+        out["region"] = m.group(1)
+    return out
+
+
+def quality_flags(row: dict[str, Any]) -> list[str]:
+    """Deterministic data-quality checks. Flagged records never default-show.
+
+    Catches parser bugs the reviewer model cannot see by reading a diff:
+    e.g. a traffic value of 1024/4096 means the source unit was MB, not GB.
+    """
+    flags: list[str] = []
+    traffic = row.get("general_traffic_gb")
+    fee = row.get("monthly_fee")
+    name = str(row.get("plan_name") or "")
+    content = str(row.get("service_content") or "")
+    text = f"{name} {content}"
+
+    if traffic is not None and traffic > 512:
+        # >512 GB monthly is implausible unless the text explicitly says so
+        if not re.search(r"(?:[5-9]\d{2,}|\d{4,})\s*(?:GB|G|TB|T)\b", text):
+            flags.append("traffic_unit_suspect")
+    if fee is not None and fee > 1000:
+        flags.append("fee_outlier")
+    return flags
+
+
 def classify(row: dict[str, Any]) -> dict[str, Any]:
     """Return (publishable, default_show, reason)."""
-    out = dict(row)
+    out = fix_region(row)
     out["excluded_phone_contract"] = has_strong_contract(row)
+    out["restricted"] = is_restricted(row)
+    out["quality_flags"] = quality_flags(row)
 
-    plan_type = str(row.get("plan_type") or "套餐")
-    fee = row.get("monthly_fee")
-    traffic = row.get("general_traffic_gb")
+    plan_type = str(out.get("plan_type") or "套餐")
+    fee = out.get("monthly_fee")
+    traffic = out.get("general_traffic_gb")
     fee_ok = fee is not None and 0 < fee <= 69
     traffic_ok = traffic is not None and traffic >= 20
 
@@ -116,7 +182,10 @@ def classify(row: dict[str, Any]) -> dict[str, Any]:
     elif plan_type == "套餐":
         default_show = fee_ok and traffic_ok
 
-    out["default_show"] = bool(default_show and not out["excluded_phone_contract"])
+    out["default_show"] = bool(
+        default_show and not out["excluded_phone_contract"] and not out["restricted"]
+        and not out["quality_flags"]
+    )
     return out
 
 

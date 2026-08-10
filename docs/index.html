@@ -37,17 +37,27 @@
   </div>
 </div>
 
+<div class="sort-panel">
+  <div class="sort-panel-head">
+    <b>排序（Excel 式多关键字）</b>
+    <span class="sort-hint">点击表头设置主排序；下方可追加第二/第三/第四关键字</span>
+    <button id="btn-add-sort">＋ 添加排序关键字</button>
+    <button id="btn-clear-sort" class="ghost">清除排序</button>
+  </div>
+  <div id="sort-keys" class="sort-keys"></div>
+</div>
+
 <table id="table">
   <thead>
     <tr>
-      <th>运营商</th>
-      <th>套餐名称</th>
-      <th>地区</th>
-      <th>类型</th>
-      <th class="num">月租(元)</th>
-      <th class="num">通用流量</th>
-      <th class="num">定向流量</th>
-      <th class="num">语音(分)</th>
+      <th data-sort="source">运营商<span class="sort-badge"></span></th>
+      <th data-sort="plan_name">套餐名称<span class="sort-badge"></span></th>
+      <th data-sort="region">地区<span class="sort-badge"></span></th>
+      <th data-sort="plan_type">类型<span class="sort-badge"></span></th>
+      <th class="num" data-sort="monthly_fee">月租(元)<span class="sort-badge"></span></th>
+      <th class="num" data-sort="general_traffic_gb">通用流量<span class="sort-badge"></span></th>
+      <th class="num" data-sort="orient_traffic_gb">定向流量<span class="sort-badge"></span></th>
+      <th class="num" data-sort="voice_minutes">语音(分)<span class="sort-badge"></span></th>
       <th>备注</th>
     </tr>
   </thead>
@@ -56,6 +66,7 @@
 
 <div class="legend">
   <span class="tag contract">合约/预存</span> 含购机合约或预存套餐（默认不推荐，可在"全部资费"查看）
+  <span class="tag restricted">门槛</span> 需特定主套餐档位/专属用户才能订购（默认不推荐）
 </div>
 
 <footer id="footer"></footer>
