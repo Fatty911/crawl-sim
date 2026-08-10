@@ -202,7 +202,19 @@ def run(playwright) -> list[dict[str, Any]]:
             timezone_id="Asia/Shanghai",
         )
         page = ctx.new_page()
-        page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+        # telecom via airport nodes can return ERR_EMPTY_RESPONSE on some nodes;
+        # retry a few times (mihomo round-robin rotates node between attempts)
+        page_content = None
+        for attempt in range(4):
+            try:
+                page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+                page_content = True
+                break
+            except Exception as exc:
+                print(f"  goto attempt {attempt + 1} failed: {type(exc).__name__}: {str(exc)[:120]}")
+                page.wait_for_timeout(8000)
+        if not page_content:
+            raise RuntimeError("telecom page unreachable via proxy after retries")
         if not wait_for_content(page):
             raise RuntimeError("telecom ruishu challenge not solved after 150s")
 
