@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import crawl_broadnet, crawl_mobile, crawl_unicom
-from scripts.merge_data import classify, is_restricted, quality_flags
+from scripts.merge_data import classify, is_broadband, is_restricted, quality_flags
 
 
 class TestUnicomUnitConversion:
@@ -111,6 +111,61 @@ class TestQualityFlags:
         row = {"plan_name": "融合套餐", "monthly_fee": 1719, "general_traffic_gb": 1000,
                "service_content": "含全国流量1000GB"}
         assert "fee_outlier" in quality_flags(row)
+
+
+class TestBroadband:
+    def base(self, **kw):
+        row = {
+            "source": "中国联通", "plan_name": "测试", "report_no": "T1",
+            "region": "全国", "plan_type": "套餐",
+            "monthly_fee": 59, "general_traffic_gb": 30,
+            "orient_traffic_gb": 0, "voice_minutes": 100, "sms": 0,
+            "contract": False, "service_content": "", "contract_desc": "",
+            "use_scope": "全网用户", "broadband": "",
+        }
+        row.update(kw)
+        return row
+
+    def test_unicom_broadband_field(self):
+        raw = {
+            "name": "联通智家全光臻宽带全家享1719元档套餐",
+            "reportNo": "25JT000002",
+            "detailsList": [{
+                "name": "联通智家全光臻宽带全家享1719元档套餐",
+                "codeType": "套餐",
+                "feesStandard": "1719",
+                "commonData": "1000",
+                "dataUnit": "GB",
+                "orientTraffic": "0",
+                "orientTrafficUnit": "GB",
+                "minute": "8000",
+                "sms": "0",
+                "broadBand": "1000M",
+                "validPeriod": "",
+                "saleChnl": "",
+                "useScope": "全网用户",
+                "extraFees": "",
+                "serviceContent": "含全国流量1000GB、全国语音8000分钟",
+            }],
+        }
+        row = crawl_unicom.normalize(raw, "全国", "套餐/融合")
+        assert row["broadband"] == "1000M"
+        assert is_broadband(row) is True
+
+    def test_mobile_broadband_from_name(self):
+        row = {"plan_name": "智家宽带融合套餐", "broadband": "", "service_content": ""}
+        assert is_broadband(row) is True
+
+    def test_mobile_plan_not_broadband(self):
+        row = {"plan_name": "59元元气卡", "broadband": "", "service_content": "国内上网前3GB按5元/GB收取"}
+        assert is_broadband(row) is False
+
+    def test_standalone_broadband_classified(self):
+        out = classify(self.base(plan_name="单宽包年预存包-500M（一年）720", broadband="500M",
+                                 general_traffic_gb=0))
+        assert out["is_broadband"] is True
+        # standalone broadband without mobile data must NOT default-show as a phone plan
+        assert out["default_show"] is False
 
 
 class TestClassify:

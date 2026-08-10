@@ -126,6 +126,10 @@ def normalize(raw: dict[str, Any], region: str) -> dict[str, Any]:
     orient = _num(raw.get("orientTraffic"))
     voice = _num(raw.get("domesticCall"))
     sms = _num(raw.get("sms"))
+    broadband = str(raw.get("bandwidth") or "").strip()
+    if not broadband or broadband == "无":
+        if re.search(r"宽带|光纤|FTTH|全光|方宽|长宽", name):
+            broadband = name
     service_content = str(raw.get("otherContent") or raw.get("tariffAttr") or "").strip()
     overage = str(raw.get("tariffAttr") or "").strip()
     return {
@@ -141,6 +145,7 @@ def normalize(raw: dict[str, Any], region: str) -> dict[str, Any]:
         "orient_traffic_gb": orient,
         "voice_minutes": voice,
         "sms": sms,
+        "broadband": broadband,
         "contract": is_contract(name, service_content),
         "contract_desc": contract_desc(name, service_content),
         "valid_period": str(raw.get("validPeriod") or "").strip(),

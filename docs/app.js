@@ -65,10 +65,12 @@
     return out;
   }
   function note(r) {
+    // full text, no truncation; the <td> gets a title attr for hover
     let parts = [];
-    if (r.contract_desc) parts.push(esc(r.contract_desc.slice(0, 40)));
-    else if (r.overage) parts.push("套外:" + esc(r.overage.slice(0, 50)));
-    else if (r.service_content) parts.push(esc(r.service_content.slice(0, 60)));
+    if (r.broadband) parts.push("[宽带] " + r.broadband);
+    if (r.contract_desc) parts.push(r.contract_desc);
+    if (r.overage) parts.push("套外:" + r.overage);
+    if (r.service_content) parts.push(r.service_content);
     return parts.join(" ");
   }
 
@@ -92,6 +94,7 @@
   function filtered() {
     let rows = all.filter(matchesFilters);
     if (view === "default") rows = rows.filter((r) => r.default_show);
+    if (view === "broadband") rows = rows.filter((r) => r.is_broadband);
     rows = sortRows(rows);
     if (!sortKeys.length) {
       // default order: recommended first, then by fee asc
@@ -220,7 +223,7 @@
         `<td class="num">${fmtGb(r.general_traffic_gb)}</td>` +
         `<td class="num">${fmtGb(r.orient_traffic_gb)}</td>` +
         `<td class="num">${r.voice_minutes == null ? "-" : r.voice_minutes}</td>` +
-        `<td class="note">${note(r)}</td>`;
+        `<td class="note" title="${esc(note(r))}">${esc(note(r))}</td>`;
       frag.appendChild(tr);
     }
     tbody.appendChild(frag);
@@ -242,8 +245,9 @@
       $(id).addEventListener("input", on);
       $(id).addEventListener("change", on);
     });
-    $("btn-default").addEventListener("click", () => { view = "default"; $("btn-default").classList.add("active"); $("btn-all").classList.remove("active"); render(); });
-    $("btn-all").addEventListener("click", () => { view = "all"; $("btn-all").classList.add("active"); $("btn-default").classList.remove("active"); render(); });
+    $("btn-default").addEventListener("click", () => { view = "default"; $("btn-default").classList.add("active"); $("btn-broadband").classList.remove("active"); $("btn-all").classList.remove("active"); render(); });
+    $("btn-broadband").addEventListener("click", () => { view = "broadband"; $("btn-broadband").classList.add("active"); $("btn-default").classList.remove("active"); $("btn-all").classList.remove("active"); render(); });
+    $("btn-all").addEventListener("click", () => { view = "all"; $("btn-all").classList.add("active"); $("btn-default").classList.remove("active"); $("btn-broadband").classList.remove("active"); render(); });
   }
 
   async function init() {

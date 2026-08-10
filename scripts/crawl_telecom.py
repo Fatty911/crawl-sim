@@ -149,6 +149,9 @@ def parse_card(text: str) -> dict[str, Any] | None:
     if not name:
         return None
     service_content = other_content
+    broadband = ""
+    if re.search(r"宽带|光纤|FTTH|全光|单宽|方宽|长宽", name) or re.search(r"宽带|FTTH|光宽", service_content):
+        broadband = name if "宽带" in name or "单宽" in name else service_content[:80]
     return {
         "source": SOURCE,
         "atomic_source_names": [SOURCE_SHORT],
@@ -162,6 +165,7 @@ def parse_card(text: str) -> dict[str, Any] | None:
         "orient_traffic_gb": orient,
         "voice_minutes": voice,
         "sms": None,
+        "broadband": broadband,
         "contract": is_contract(name, service_content + " " + fee_text),
         "contract_desc": contract_desc(name, service_content + " " + fee_text),
         "valid_period": valid,

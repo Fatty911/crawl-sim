@@ -117,6 +117,7 @@ def parse_card(text: str) -> dict[str, Any] | None:
         "orient_traffic_gb": orient,
         "voice_minutes": voice,
         "sms": None,
+        "broadband": broadband if broadband and broadband != "-" else "",
         "contract": is_contract(name, service_content + " " + fee_text),
         "contract_desc": contract_desc(name, service_content + " " + fee_text),
         "valid_period": valid,
@@ -203,20 +204,26 @@ async def run() -> list[dict[str, Any]]:
                 range_tab,
             )
             await page.wait_for_timeout(8000)
-            # scroll step by step, collecting cards at every stop (virtual scrolling)
+            # scroll step by step, collecting cards at every stop (virtual scrolling);
+            # then scroll back to top and sweep down again to force all rows to render
             collected: list[str] = []
-            prev = 0
-            for _ in range(20):
-                raw_cards = await extract_cards(page)
-                for text in raw_cards:
-                    if text not in collected:
-                        collected.append(text)
-                await page.mouse.wheel(0, 1800)
-                await page.wait_for_timeout(1000)
-                cur = await page.evaluate("() => document.body.innerText.length")
-                if cur == prev and not raw_cards:
-                    break
-                prev = cur
+            for sweep in range(2):
+                prev = 0
+                for _ in range(30):
+                    raw_cards = await extract_cards(page)
+                    for text in raw_cards:
+                        if text not in collected:
+                            collected.append(text)
+                    await page.mouse.wheel(0, 1500)
+                    await page.wait_for_timeout(1500)
+                    cur = await page.evaluate("() => document.body.innerText.length")
+                    if cur == prev and not raw_cards:
+                        break
+                    prev = cur
+                if sweep == 0:
+                    # jump back to top for the second sweep
+                    await page.evaluate("() => window.scrollTo(0, 0)")
+                    await page.wait_for_timeout(3000)
             raw_cards = await extract_cards(page)
             for text in raw_cards:
                 if text not in collected:

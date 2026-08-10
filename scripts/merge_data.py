@@ -158,12 +158,27 @@ def quality_flags(row: dict[str, Any]) -> list[str]:
     return flags
 
 
+BROADBAND_KEYWORDS = ["宽带", "光纤", "FTTH", "全光", "单宽", "方宽", "长宽"]
+
+
+def is_broadband(row: dict[str, Any]) -> bool:
+    """True if the plan includes broadband (standalone or bundled with mobile)."""
+    name = str(row.get("plan_name") or "")
+    broadband = str(row.get("broadband") or "")
+    content = str(row.get("service_content") or "")[:200]
+    if broadband and broadband not in ("无", "0", "-"):
+        return True
+    text = f"{name} {content}"
+    return any(kw in text for kw in BROADBAND_KEYWORDS)
+
+
 def classify(row: dict[str, Any]) -> dict[str, Any]:
     """Return (publishable, default_show, reason)."""
     out = fix_region(row)
     out["excluded_phone_contract"] = has_strong_contract(row)
     out["restricted"] = is_restricted(row)
     out["quality_flags"] = quality_flags(row)
+    out["is_broadband"] = is_broadband(row)
 
     plan_type = str(out.get("plan_type") or "套餐")
     fee = out.get("monthly_fee")

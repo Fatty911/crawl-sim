@@ -59,6 +59,8 @@ def post(s: requests.Session, path: str, params: dict[str, str]) -> dict[str, An
             data = resp.json()
             if data.get("code") == "0000":
                 return data
+            if data.get("code") == "0001":  # 当前目录下暂无资费信息 -> normal empty
+                return {"code": "0000", "data": {"dataList": []}}
             raise RuntimeError(f"api error code={data.get('code')} msg={data.get('msg')}")
         except (requests.RequestException, ValueError, RuntimeError) as exc:
             if attempt == 3:
@@ -75,6 +77,8 @@ def fetch_plans(s: requests.Session, province_id: str, city_id: str) -> list[dic
     for tariff_attributes, scope in (("1", "本省"), ("2", "全国")):
         for first_level, first_name, second_level, second_name in (
             ("1", "套餐", "1001", "移网"),
+            ("1", "套餐", "1002", "宽带"),
+            ("1", "套餐", "1004", "融合"),
             ("2", "加装包", "2001", "流量包"),
         ):
             params: dict[str, str] = {
@@ -140,6 +144,13 @@ def normalize(raw: dict[str, Any], scope: str, category: str) -> dict[str, Any]:
     m = re.search(r"(\d+(?:\.\d+)?)", voice_text)
     if m:
         voice = float(m.group(1))
+    broadband = str(detail.get("broadBand") or "").strip()
+    if not broadband or broadband in ("无", "0", "-"):
+        # fall back to plan name hints
+        if re.search(r"宽带|光纤|FTTH|全光|方宽|长宽", name):
+            broadband = name
+        else:
+            broadband = ""
     service_content = str(detail.get("serviceContent") or "").strip()
     overage = str(detail.get("extraFees") or "").strip()
     return {
@@ -155,6 +166,7 @@ def normalize(raw: dict[str, Any], scope: str, category: str) -> dict[str, Any]:
         "orient_traffic_gb": orient,
         "voice_minutes": voice,
         "sms": _to_float(detail.get("sms")),
+        "broadband": broadband,
         "contract": is_contract(name, service_content),
         "contract_desc": contract_desc(name, service_content),
         "valid_period": str(detail.get("validPeriod") or "").strip(),
