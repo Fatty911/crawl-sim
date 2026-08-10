@@ -172,8 +172,25 @@ async def run() -> list[dict[str, Any]]:
             print(f"  using proxy for playwright: {proxy}")
         ctx = await browser.new_context(**ctx_kwargs)
         page = await ctx.new_page()
-        await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(20000)
+        # mobile page via airport nodes may render an empty shell on some nodes;
+        # retry with fresh page loads (mihomo rotates node between attempts)
+        loaded = False
+        for attempt in range(4):
+            try:
+                await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(25000)
+                loaded = True
+                break
+            except Exception as exc:
+                print(f"  goto attempt {attempt + 1} failed: {type(exc).__name__}: {str(exc)[:120]}")
+                await page.wait_for_timeout(8000)
+        if not loaded:
+            raise RuntimeError("mobile page unreachable via proxy after retries")
+        page_url = page.url
+        page_title = await page.title()
+        print(f"  mobile page url={page_url} title={page_title[:60]}")
+        if "tariffZonePers" not in page_url:
+            print("  WARNING: page redirected away from tariff zone, cards may be empty")
 
         results: list[dict[str, Any]] = []
         for range_tab, region in (("全网资费", "全国"), ("北京资费", "北京")):
@@ -222,7 +239,12 @@ def main() -> int:
 
     import asyncio
 
-    rows = asyncio.run(run())
+    rows: list[dict[str, Any]] = []
+    for attempt in range(1, 4):
+        rows = asyncio.run(run())
+        if rows:
+            break
+        print(f"  mobile crawl produced 0 rows on attempt {attempt}; retrying with fresh browser")
     if len(rows) < args.min_records:
         print(f"FAIL: only {len(rows)} rows (< {args.min_records})", file=sys.stderr)
         return 2
