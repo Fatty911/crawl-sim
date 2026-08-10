@@ -41,7 +41,7 @@ jobs:
         run: >-
           python scripts/setup_proxy_runtime.py
           --require-proxy
-          --test-url https://m.10099.com.cn/contact-web/api/goods/queryTariffCondition
+          --test-url https://m.10099.com.cn/costNotice/
 
       - name: Crawl Broadnet tariffs
         run: >-
@@ -71,11 +71,3 @@ jobs:
           path: data/broadnet.json
           if-no-files-found: error
           retention-days: 7
-
-      - name: Trigger merge
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.ACTION_PAT || secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run merge-and-filter.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-            -f trigger_source=broadnet-crawl -f crawler_run_id=${{ github.run_id }}

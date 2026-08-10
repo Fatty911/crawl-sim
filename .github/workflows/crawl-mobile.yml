@@ -75,11 +75,3 @@ jobs:
           path: data/mobile.json
           if-no-files-found: error
           retention-days: 7
-
-      - name: Trigger merge
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.ACTION_PAT || secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run merge-and-filter.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-            -f trigger_source=mobile-crawl -f crawler_run_id=${{ github.run_id }}
