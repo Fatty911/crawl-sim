@@ -94,7 +94,6 @@ def opencode_generate(prompt: str, *, effort: str = "high", max_tokens: int = 20
             opencode_bin, "run", "--pure", "--agent", "plan",
             "--model", f"{GENERATOR_PROVIDER_NAME}/{GENERATOR_MODEL}",
             "--format", "default", "--dir", tmpdir, "--file", "prompt.md",
-            "Answer the attached prompt directly. Do not call tools or modify files. Return only the requested unified diff.",
         ]
         try:
             completed = subprocess.run(cmd, capture_output=True, text=True, timeout=2400, env=env)
