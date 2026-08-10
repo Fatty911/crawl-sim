@@ -38,11 +38,14 @@ jobs:
         run: python -m pip install -r requirements.txt
 
       - name: Download latest verified Release
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
         run: |
           mkdir -p release
           for pat in sim-latest.json sim-filtered.json; do
             gh release download data-latest --repo "$GITHUB_REPOSITORY" --pattern "$pat" --dir release || true
           done
+          ls -la release/ || true
 
       - name: Build site
         run: |
@@ -55,6 +58,10 @@ jobs:
           fi
           if [ -s release/sim-filtered.json ]; then
             cp release/sim-filtered.json site/data/filtered.json
+          fi
+          if [ ! -s site/data/filtered.json ]; then
+            echo "::error::release 数据缺失 (sim-filtered.json 下载失败), 拒绝发布空壳站点"
+            exit 1
           fi
           python - <<'PY'
           import json, os
