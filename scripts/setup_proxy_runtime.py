@@ -235,6 +235,18 @@ def download_mihomo(bin_dir: Path) -> Path | None:
         return None
 
 
+def _sanitize_proxy(proxy: dict[str, Any]) -> dict[str, Any]:
+    """mihomo 要求 alpn 为字符串数组；部分机场订阅给出字符串或 null，
+    导致启动报 "'alpn' is not a slice"。清洗为数组或移除。"""
+    out = dict(proxy)
+    alpn = out.get("alpn")
+    if isinstance(alpn, str):
+        out["alpn"] = [alpn] if alpn.strip() else []
+    elif not isinstance(alpn, list):
+        out.pop("alpn", None)
+    return out
+
+
 def parse_nodes(
     subscriptions: list[str], excluded: list[str]
 ) -> list[dict[str, Any]]:
@@ -244,6 +256,7 @@ def parse_nodes(
     for url in subscriptions:
         print(f"parsing subscription: {redact_url(url)}")
         for proxy in generator.parse_subscription(url, excluded):
+            proxy = _sanitize_proxy(proxy)
             key = str(proxy.get("name") or "").strip() or json.dumps(
                 proxy, sort_keys=True, ensure_ascii=False
             )
