@@ -28,7 +28,6 @@ ALLOWED_FILES = {
     "scripts/merge_data.py",
     "scripts/verify_pages_ui.py",
     "scripts/crawl_runtime.py",
-    "scripts/crawler_utils.py",
     ".github/workflows/crawl-unicom.yml",
     ".github/workflows/crawl-broadnet.yml",
     ".github/workflows/crawl-mobile.yml",
@@ -40,9 +39,7 @@ ALLOWED_FILES = {
     "docs/app.js",
     "docs/style.css",
     "config/filter_conditions.json",
-    "tests/test_crawler_parsers.py",
-    "tests/test_merge_data.py",
-    "tests/test_workflow_contracts.py",
+    "tests/test_data_quality.py",
 }
 FORBIDDEN_PATCH_HEADERS = ("diff --git a/.github/workflows/AI", "diff --git a/.git")
 DIFF_HEADER = re.compile(r"^diff --git a/(.+?) b/(.+?)$")
@@ -50,7 +47,7 @@ DIFF_HEADER = re.compile(r"^diff --git a/(.+?) b/(.+?)$")
 GENERATOR_PROVIDER_NAME = "zenmux"
 GENERATOR_BASE_URL = "https://zenmux.ai/api/v1"
 GENERATOR_KEY_ENV = "ZENMUX_API_KEY"
-GENERATOR_MODEL = "deepseek/deepseek-v4-flash"
+GENERATOR_MODEL = "deepseek-v4-flash"
 
 
 def fail(message: str) -> None:
@@ -89,11 +86,16 @@ def opencode_generate(prompt: str, *, effort: str = "high", max_tokens: int = 20
         env["HTTP_PROXY"] = proxy
     opencode_bin = os.environ.get("OPENCODE_BIN", "opencode")
     with tempfile.TemporaryDirectory(prefix="sim-gen-") as tmpdir:
-        (Path(tmpdir) / "prompt.md").write_text(prompt, encoding="utf-8")
+        prompt_file = Path(tmpdir) / "prompt.md"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        # 注意：message 必须在 --file 之前（yargs 会把 --file 后的位置参数当文件）；
+        # --file 按进程 cwd 解析，必须传绝对路径（--dir 不影响 --file 解析）。
         cmd = [
             opencode_bin, "run", "--pure", "--agent", "plan",
             "--model", f"{GENERATOR_PROVIDER_NAME}/{GENERATOR_MODEL}",
-            "--format", "default", "--dir", tmpdir, "--file", "prompt.md",
+            "--format", "default", "--dir", tmpdir,
+            "Answer the attached prompt directly. Do not call tools or modify files. Return only the requested unified diff.",
+            "--file", str(prompt_file),
         ]
         try:
             completed = subprocess.run(cmd, capture_output=True, text=True, timeout=2400, env=env)
@@ -162,8 +164,19 @@ Crawler contract:
     publish_rule = """
 Publication invariants (do NOT weaken):
 - Exclude phone-contract plans (充话费送手机 / 购机合约 / 预存得券) via excluded_phone_contract.
+- Exclude campus-restricted broadband (校园/高校/学生 限定, e.g. 校园宽带/沃派校园专属) via
+  excluded_campus: only for is_broadband rows; such rows must never appear in the published
+  filtered.json payload.
 - default_show: 套餐 with 通用流量>=20G and 月租<=69元; 流量包 with >=10G, <=30元, <=1元/GB.
 - A rejected raw record must never become a published record via the UI.
+- Broadband plans carry broadband_mbps (downlink Mbps) and access_method
+  (光纤/FTTR/同轴(HFC)/无线(FWA)/ADSL). is_broadband must NOT be triggered by marketing text
+  mentioning 宽带 (negation like 不可办理含宽带, function description like 宽带上网安全,
+  exclusive listing like 与…宽带类…互斥); extract bandwidth only from broadband field,
+  plan name, or bandwidth-context content; mobile-network peak rates (5G-A 下行3Gbps,
+  移动上网速率/峰值速率/网络最高) are NOT broadband bandwidth.
+- 广电 yearly plans named "一年…XX元档" (e.g. 靓号宽带双享包48元档) use tier price / 12 as
+  monthly fee; the API productPrice is unreliable for tier products.
 """
     return f"""You are fixing a failing operator-tariff crawler/pipeline in the crawl-sim repo.
 
@@ -215,10 +228,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     # apply to a clean checkout
     check = run(["git", "stash", "list"], repo)
-    run(["git", "apply", "--whitespace=error", str(args.patch)], repo)
+    apply_result = run(["git", "apply", "--whitespace=error", str(args.patch)], repo)
+    if apply_result.returncode != 0:
+        fail(f"git apply failed: {(apply_result.stderr or '').strip()[:300]}")
     if run(["git", "diff", "--check"], repo).returncode != 0:
         fail("git diff --check failed")
-    checks.append("merge_workflow" if ".github/workflows/merge-and-filter.yml" in paths else "merge_workflow")
+    checks.append("merge_workflow")
 
     # deterministic checks
     if run(["python", "-m", "py_compile"] + sorted(str(repo / p) for p in paths if p.endswith(".py")), repo).returncode != 0:

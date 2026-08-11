@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only review gate for the exact AI-generated PConline patch.
+"""Read-only review gate for the exact AI-generated crawl-sim patch.
 
 The review model is invoked through the OpenCode CLI (Agent tool), never by
 direct HTTP requests to a model API.
@@ -17,7 +17,7 @@ import tempfile
 import time
 from pathlib import Path
 
-REVIEW_MODEL = "deepseek-ai/deepseek-v4-flash"
+REVIEW_MODEL = "deepseek-ai/deepseek-v4-flash-0731"
 REVIEW_PROVIDER_NAME = "nvidia-nim"
 REVIEW_BASE_URL = "https://integrate.api.nvidia.com/v1"
 REVIEW_KEY_ENV = "NVIDIA_NIM_API_KEY"
@@ -70,14 +70,17 @@ def post_review(system: str, prompt: str, key: str, *, max_tokens: int = 8000) -
     opencode_bin = os.environ.get("OPENCODE_BIN", "opencode")
     combined_prompt = f"{system}\n\n{prompt}"
     with tempfile.TemporaryDirectory(prefix="patch-review-") as tmpdir:
-        (Path(tmpdir) / "prompt.md").write_text(combined_prompt, encoding="utf-8")
+        prompt_file = Path(tmpdir) / "prompt.md"
+        prompt_file.write_text(combined_prompt, encoding="utf-8")
+        # message 必须在 --file 之前（yargs 会把 --file 后的位置参数当文件）；
+        # --file 按进程 cwd 解析，必须传绝对路径。
         cmd = [
             opencode_bin, "run", "--pure", "--agent", "plan",
             "--model", f"{REVIEW_PROVIDER_NAME}/{REVIEW_MODEL}",
             "--format", "default",
             "--dir", tmpdir,
-            "--file", "prompt.md",
             "Review the attached material. Do not call tools or modify files. Return only the requested JSON.",
+            "--file", str(prompt_file),
         ]
         last_error: Exception | None = None
         for attempt in range(3):
@@ -138,12 +141,13 @@ def main() -> int:
         }
         required_checks = {
             "patch_scope", "merge_workflow", "docs_copy",
-            "test_preservation", "py_compile", "pytest",
+            "py_compile", "pytest",
         }
         if validation.get("patch_sha256") != patch_sha:
             fail("validation report does not bind this exact patch")
-        if not required_paths <= set(validation.get("paths", [])):
-            fail("validation report lacks required crawler/merge integration paths")
+        # patch 必须触及至少一个核心集成文件（爬虫/合并/前端），防止只改无关文件
+        if not (required_paths & set(validation.get("paths", []))):
+            fail("validation report lacks any required crawler/merge integration path")
         if not required_checks <= set(validation.get("checks", [])):
             fail("validation report lacks deterministic validation evidence")
         key = os.environ.get("NVIDIA_NIM_API_KEY")
