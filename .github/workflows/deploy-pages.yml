@@ -158,3 +158,184 @@ jobs:
         run: |
           gh workflow run ai-sim-repair.yml --repo "$GITHUB_REPOSITORY" --ref main \
             -f attempt=1 || echo "repair dispatch failed (non-blocking)"
+
+  ai-audit:
+    needs: [deploy, verify]
+    if: always() && needs.deploy.result == 'success' && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@main
+
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@main
+        with:
+          node-version: "22"
+
+      - name: Install deps + playwright + opencode
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install playwright==1.61.0
+          python -m playwright install chromium-headless-shell
+          npm install --global opencode-ai@latest
+
+      - name: Collect page audit (render JS + scan accuracy/readability)
+        id: audit
+        continue-on-error: true
+        run: |
+          python scripts/audit_pages_ai.py \
+            --output "$RUNNER_TEMP/pages-audit-report.json" \
+            --prompt "$RUNNER_TEMP/pages-audit-prompt.md"
+
+      - name: AI review audit report
+        id: ai_review
+        continue-on-error: true
+        env:
+          ZENMUX_API_KEY: ${{ secrets.ZENMUX_API_KEY }}
+          DMIT_PROXY_URL: ${{ secrets.DMIT_PROXY_URL }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          prompt_file = os.path.join(os.environ["RUNNER_TEMP"], "pages-audit-prompt.md")
+          # 审计收集失败（无报告/prompt）时不得静默吞掉：强制 NEEDS_ATTENTION
+          if not os.path.isfile(prompt_file):
+              msg = "AI 页面审计：审计收集步骤失败（未生成报告），需人工查看 run 日志"
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(json.dumps({"conclusion": "NEEDS_ATTENTION", "summary": msg, "real_issues": [{"severity": "error", "item": "audit collection", "reason": msg, "suggestion": "查看 workflow run 日志定位失败原因"}], "audit_failed": True}, ensure_ascii=False, indent=1))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              print("audit collection failed -> NEEDS_ATTENTION issue")
+              raise SystemExit(0)
+          read_only = {
+              "*": "deny", "read": "allow", "edit": "deny", "bash": "deny",
+              "webfetch": "deny", "task": "deny", "question": "deny", "external_directory": "deny",
+          }
+          config = {
+              "provider": {
+                  "zenmux": {
+                      "npm": "@ai-sdk/openai-compatible",
+                      "name": "zenmux",
+                      "options": {"baseURL": "https://zenmux.ai/api/v1", "apiKey": "{env:ZENMUX_API_KEY}"},
+                      "models": {"deepseek-v4-flash": {"limit": {"context": 1000000, "output": 8000}}},
+                  }
+              },
+              "agent": {"plan": {"permission": read_only}},
+              "permission": read_only,
+          }
+          env = dict(os.environ)
+          env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, ensure_ascii=False)
+          env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+          env["OPENCODE_DISABLE_TELEMETRY"] = "1"
+          proxy = os.environ.get("DMIT_PROXY_URL", "").strip()
+          if proxy:
+              env["NODE_USE_ENV_PROXY"] = "1"
+              env["HTTPS_PROXY"] = proxy
+              env["HTTP_PROXY"] = proxy
+          cmd = [
+              "opencode", "run", "--pure", "--agent", "plan",
+              "--model", "zenmux/deepseek-v4-flash",
+              "--format", "default", "--dir", os.environ["RUNNER_TEMP"],
+              "Review the attached page-audit report. Output ONLY the requested JSON (no markdown fence, no extra text).",
+              "--file", prompt_file,
+          ]
+          try:
+              out = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=840)
+          except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+              # 超时/启动异常：continue-on-error 会吞掉异常，必须显式强制 NEEDS_ATTENTION
+              forced = {"conclusion": "NEEDS_ATTENTION",
+                        "summary": f"AI 页面审计：opencode 调用失败（{type(exc).__name__}），需人工查看 run 日志",
+                        "real_issues": [{"severity": "error", "item": "ai review", "reason": f"{type(exc).__name__}: {str(exc)[:200]}",
+                                         "suggestion": "查看 workflow run 日志与 pages-ai-audit artifact"}],
+                        "forced": True}
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(json.dumps(forced, ensure_ascii=False, indent=1))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              print(f"opencode call failed ({type(exc).__name__}) -> forced NEEDS_ATTENTION")
+              raise SystemExit(0)
+          ai_text = out.stdout.strip()
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "ai-review.md"), "w", encoding="utf-8") as fh:
+              fh.write(ai_text[-8000:] + "\n--- stderr tail ---\n" + out.stderr[-1500:])
+          print(ai_text[-4000:])
+          if out.returncode != 0:
+              print("WARN: opencode exit", out.returncode)
+          # decide issue trigger: BROKEN / NEEDS_ATTENTION conclusion
+          # strip markdown code fences / surrounding prose before parsing
+          import re as _re
+          ai_clean = _re.sub(r"```(?:json)?", "", ai_text)
+          ai_clean = ai_clean[ai_clean.find("{"): ai_clean.rfind("}") + 1]
+          ai_ok = True
+          try:
+              verdict = json.loads(ai_clean)
+              conclusion = str(verdict.get("conclusion", "")).upper()
+              if conclusion not in ("OK", "BROKEN", "NEEDS_ATTENTION"):
+                  # 非法结论值（UNKNOWN/拼写错误/缺失）视为 AI 输出不可用
+                  conclusion = ""
+                  ai_ok = False
+          except Exception:
+              conclusion = ""
+              ai_ok = False
+          # 审计报告含 error 级问题 → 即使 AI 判 OK 也强制 NEEDS_ATTENTION（防 AI 忽略）
+          report_error = False
+          try:
+              report = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "pages-audit-report.json"), encoding="utf-8"))
+              report_error = any(i.get("severity") == "error" for i in report.get("issues", []))
+          except Exception:
+              report_error = False
+          # opencode 非零退出/不可解析 → AI 审查不可用，视为 NEEDS_ATTENTION
+          if not ai_ok or out.returncode != 0 or report_error:
+              reason = "AI 审查不可用" if (not ai_ok or out.returncode != 0) else "审计报告含 error 级问题"
+              forced = {"conclusion": "NEEDS_ATTENTION", "summary": f"AI 页面审计：{reason}（AI 原始输出与报告见 artifact）",
+                        "real_issues": [{"severity": "error", "item": "audit", "reason": reason,
+                                         "suggestion": "查看 pages-ai-audit artifact 的 ai-review.md 与 pages-audit-report.json"}],
+                        "forced": True}
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(json.dumps(forced, ensure_ascii=False, indent=1))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              print(f"forced NEEDS_ATTENTION: {reason}")
+              raise SystemExit(0)
+          if conclusion in ("BROKEN", "NEEDS_ATTENTION"):
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(ai_text[-4000:])
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write(f"needs_attention=true\n")
+              print(f"AI audit conclusion: {conclusion} -> issue will be opened")
+          else:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=false\n")
+              print(f"AI audit conclusion: {conclusion or 'UNPARSEABLE'} -> no issue")
+          PY
+
+      - name: Upload audit artifacts
+        if: always()
+        uses: actions/upload-artifact@main
+        with:
+          name: pages-ai-audit-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pages-audit-report.json
+            ${{ runner.temp }}/pages-audit-prompt.md
+            ${{ runner.temp }}/ai-review.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Open audit-failed issue
+        if: steps.ai_review.outputs.needs_attention == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          gh label create sim-pages-audit-failed --repo "$GITHUB_REPOSITORY" \
+            --color FBCA04 --description "Pages AI 审计发现需人工介入问题" 2>/dev/null || true
+          OLD=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                --label sim-pages-audit-failed --json number --jq '.[].number' | head -1)
+          if [ -n "$OLD" ]; then gh issue close "$OLD" --repo "$GITHUB_REPOSITORY" || true; fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "Pages AI 审计: ${{ github.run_id }}" \
+            --label sim-pages-audit-failed \
+            --body "$(cat "$RUNNER_TEMP/audit-needs-attention")"
