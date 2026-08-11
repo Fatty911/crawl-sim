@@ -276,26 +276,53 @@ jobs:
               "Review the attached page-audit report. Output ONLY the requested JSON (no markdown fence, no extra text).",
               "--file", prompt_file,
           ]
+
+          def parse_verdict(text: str):
+              """鲁棒提取 JSON 结论：优先 ```json 代码块，再用 JSONDecoder.raw_decode
+              逐个 { 起点解析完整 JSON 值（天然容忍尾部垃圾文本）。
+              NIM 免费层偶发输出退化（循环垃圾文本包围 JSON，2026-08-11 实测）。"""
+              import re as _re
+              dec = json.JSONDecoder()
+              cands = _re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.S)
+              starts = [m.start() for m in _re.finditer(r"\{", text)]
+              for cand in cands:
+                  try:
+                      v = json.loads(cand)
+                      if isinstance(v, dict) and str(v.get("conclusion", "")).upper() in ("OK", "BROKEN", "NEEDS_ATTENTION"):
+                          return v
+                  except Exception:
+                      continue
+              for i in starts:
+                  try:
+                      v, _ = dec.raw_decode(text, i)
+                      if isinstance(v, dict) and str(v.get("conclusion", "")).upper() in ("OK", "BROKEN", "NEEDS_ATTENTION"):
+                          return v
+                  except Exception:
+                      continue
+              return None
+
           out = None
+          verdict = None
           last_err = ""
-          # NIM 从 runner IP 有 529 风控（记忆 2026-08-02 实测）：初次调用 + 3 次重试 + 封顶退避
-          # 探测步骤（probe_nim）已确认端点可达才走到这里；探测失败时 subprocess 调用
-          # 会失败进入重试，重试耗尽后强制 NEEDS_ATTENTION（兜底不静默）
+          # NIM 从 runner IP 有 529 风控（记忆 2026-08-02 实测）；输出退化（垃圾文本/不可解析）
+          # 也视为失败重试——只有解析出合法 conclusion 才算成功。初次调用 + 3 次重试 + 封顶退避
           for attempt in range(1, 5):
               try:
                   out = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=840)
-                  if out.returncode == 0 and out.stdout.strip():
+                  if out.returncode == 0:
+                      verdict = parse_verdict(out.stdout)
+                  if verdict is not None:
                       break
-                  last_err = f"exit={out.returncode} stderr={out.stderr[-200:]!r}"
+                  last_err = f"exit={out.returncode} output-unparseable"
               except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
                   last_err = f"{type(exc).__name__}: {str(exc)[:150]}"
               print(f"NIM review attempt {attempt} failed: {last_err}")
               if attempt < 4:
                   time.sleep(30 * attempt)
-          if out is None or out.returncode != 0 or not out.stdout.strip():
-              # 重试耗尽：continue-on-error 会吞掉异常，必须显式强制 NEEDS_ATTENTION
+          if verdict is None:
+              # 重试耗尽/输出不可解析：continue-on-error 会吞掉异常，必须显式强制 NEEDS_ATTENTION
               forced = {"conclusion": "NEEDS_ATTENTION",
-                        "summary": f"AI 页面审计：opencode(NIM) 调用失败（{last_err}），需人工查看 run 日志",
+                        "summary": f"AI 页面审计：opencode(NIM) 审查失败（{last_err}），需人工查看 run 日志",
                         "real_issues": [{"severity": "error", "item": "ai review", "reason": last_err,
                                          "suggestion": "查看 workflow run 日志与 pages-ai-audit artifact"}],
                         "forced": True}
@@ -303,30 +330,17 @@ jobs:
                   fh.write(json.dumps(forced, ensure_ascii=False, indent=1))
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
                   fh.write("needs_attention=true\n")
-              print("opencode(NIM) call failed after retries -> forced NEEDS_ATTENTION")
+              print("opencode(NIM) review failed after retries -> forced NEEDS_ATTENTION")
               raise SystemExit(0)
           ai_text = out.stdout.strip()
           with open(os.path.join(os.environ["RUNNER_TEMP"], "ai-review.md"), "w", encoding="utf-8") as fh:
               fh.write(ai_text[-8000:] + "\n--- stderr tail ---\n" + out.stderr[-1500:])
           print(ai_text[-4000:])
-          if out.returncode != 0:
-              print("WARN: opencode exit", out.returncode)
-          # decide issue trigger: BROKEN / NEEDS_ATTENTION conclusion
-          # strip markdown code fences / surrounding prose before parsing
-          import re as _re
-          ai_clean = _re.sub(r"```(?:json)?", "", ai_text)
-          ai_clean = ai_clean[ai_clean.find("{"): ai_clean.rfind("}") + 1]
-          ai_ok = True
-          try:
-              verdict = json.loads(ai_clean)
-              conclusion = str(verdict.get("conclusion", "")).upper()
-              if conclusion not in ("OK", "BROKEN", "NEEDS_ATTENTION"):
-                  # 非法结论值（UNKNOWN/拼写错误/缺失）视为 AI 输出不可用
-                  conclusion = ""
-                  ai_ok = False
-          except Exception:
+          # verdict 已由 parse_verdict 提取（重试成功路径保证非 None）
+          conclusion = str(verdict.get("conclusion", "")).upper()
+          if conclusion not in ("OK", "BROKEN", "NEEDS_ATTENTION"):
+              # 非法结论值（UNKNOWN/拼写错误/缺失）视为 AI 输出不可用
               conclusion = ""
-              ai_ok = False
           # 审计报告含 error 级问题 → 即使 AI 判 OK 也强制 NEEDS_ATTENTION（防 AI 忽略）
           report_error = False
           try:
@@ -334,9 +348,8 @@ jobs:
               report_error = any(i.get("severity") == "error" for i in report.get("issues", []))
           except Exception:
               report_error = False
-          # opencode 非零退出/不可解析 → AI 审查不可用，视为 NEEDS_ATTENTION
-          if not ai_ok or out.returncode != 0 or report_error:
-              reason = "AI 审查不可用" if (not ai_ok or out.returncode != 0) else "审计报告含 error 级问题"
+          if not conclusion or report_error:
+              reason = "AI 审查结论非法" if not conclusion else "审计报告含 error 级问题"
               forced = {"conclusion": "NEEDS_ATTENTION", "summary": f"AI 页面审计：{reason}（AI 原始输出与报告见 artifact）",
                         "real_issues": [{"severity": "error", "item": "audit", "reason": reason,
                                          "suggestion": "查看 pages-ai-audit artifact 的 ai-review.md 与 pages-audit-report.json"}],
