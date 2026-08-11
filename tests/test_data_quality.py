@@ -168,6 +168,86 @@ class TestBroadband:
         assert out["default_show"] is False
 
 
+class TestBroadbandFields:
+    """宽带带宽大小（broadband_mbps）与接入方式（access_method）提取。"""
+
+    def base(self, **kw):
+        row = {
+            "source": "中国联通", "plan_name": "测试", "report_no": "T1",
+            "region": "全国", "plan_type": "套餐",
+            "monthly_fee": 59, "general_traffic_gb": 30,
+            "orient_traffic_gb": 0, "voice_minutes": 100, "sms": 0,
+            "contract": False, "service_content": "", "contract_desc": "",
+            "use_scope": "全网用户", "broadband": "",
+        }
+        row.update(kw)
+        return row
+
+    def test_pure_m(self):
+        out = classify(self.base(plan_name="1000M宽带一年期", broadband="1000M"))
+        assert out["broadband_mbps"] == 1000
+
+    def test_uplink_in_parens_ignored(self):
+        out = classify(self.base(plan_name="千兆宽带", broadband="1000M（上行40M）"))
+        assert out["broadband_mbps"] == 1000
+
+    def test_m_in_cjk_context(self):
+        # Python \b 不识别中文字符边界，必须用 (?![0-9A-Za-z])
+        out = classify(self.base(plan_name="单宽包年预存包", broadband="一条1000M宽带"))
+        assert out["broadband_mbps"] == 1000
+
+    def test_speedup_pack_target(self):
+        out = classify(self.base(plan_name="提速包", broadband="200M提速到300M宽带提速包（12个月）"))
+        assert out["broadband_mbps"] == 300
+
+    def test_qianzhao_word(self):
+        out = classify(self.base(plan_name="移动看家尊享福袋千兆版", broadband="",
+                                 service_content="含千兆宽带提速服务"))
+        assert out["broadband_mbps"] == 1000
+
+    def test_gbps_unit(self):
+        out = classify(self.base(plan_name="全家享套餐", broadband="下行最高1Gbps"))
+        assert out["broadband_mbps"] == 1000
+
+    def test_mobile_speed_not_bandwidth(self):
+        # 5G-A 移网峰值速率不算宽带带宽
+        out = classify(self.base(plan_name="5G-A399元套餐", broadband="399元/月，含240GB全国流量（网络最高下行3Gbps，最高上行400Mbps）"))
+        assert out["broadband_mbps"] is None
+
+    def test_bundle_bandwidth_from_content(self):
+        # bb 字段被截断时，从 service_content 的"加装/含一条"语境兜底
+        out = classify(self.base(plan_name="5G-A399元套餐", broadband="399元/月，含240GB全国流量",
+                                 service_content="除橙分期合约外，加装2000M宽带（含FTTR一主一从）可享AI权益超市120元额度任选。"))
+        assert out["broadband_mbps"] == 2000
+        assert out["access_method"] == "FTTR"
+
+    def test_5g_not_bandwidth(self):
+        out = classify(self.base(plan_name="一年300M宽带5G套餐", broadband="300M"))
+        assert out["broadband_mbps"] == 300  # 5G 不放大 1000 倍
+
+    def test_content_hfc_downlink(self):
+        out = classify(self.base(plan_name="双网影音包", broadband="",
+                                 service_content="HFC网络：下行200Mbps/上行11Mbps；FTTH网络：下行200Mbps/上行40Mbps"))
+        assert out["broadband_mbps"] == 200
+        assert out["access_method"] == "光纤"
+
+    def test_access_fwa(self):
+        out = classify(self.base(plan_name="FWA通用流量加装包", broadband="10元/次，包含FWA无线宽带200GB流量"))
+        assert out["access_method"] == "无线(FWA)"
+        assert out["broadband_mbps"] is None
+
+    def test_access_fttr_priority(self):
+        out = classify(self.base(plan_name="爱家福袋FTTR-WiFi7（2000M）", broadband="",
+                                 service_content="爱家光网WiFi 7一主一从方案部署，提速至2000M。合约到期2000M宽带提速自动恢复原价"))
+        assert out["access_method"] == "FTTR"
+
+    def test_non_broadband_none(self):
+        out = classify(self.base(plan_name="59元元气卡", broadband="",
+                                 service_content="国内上网前3GB按5元/GB收取"))
+        assert out["broadband_mbps"] is None
+        assert out["access_method"] is None
+
+
 class TestClassify:
     def base(self, **kw):
         row = {

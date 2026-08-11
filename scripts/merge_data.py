@@ -172,6 +172,96 @@ def is_broadband(row: dict[str, Any]) -> bool:
     return any(kw in text for kw in BROADBAND_KEYWORDS)
 
 
+ACCESS_METHOD_RULES: list[tuple[str, re.Pattern[str]]] = [
+    ("FTTR", re.compile(r"FTTR|全屋光|光纤到房间|光组网|光网WiFi", re.IGNORECASE)),
+    ("光纤", re.compile(r"光纤|FTTH|全光|光网|光猫|GPON|XG-?PON|10G-?PON", re.IGNORECASE)),
+    ("同轴(HFC)", re.compile(r"HFC|同轴|Cable", re.IGNORECASE)),
+    ("无线(FWA)", re.compile(r"FWA|无线宽带|CPE|5G路由器|4G路由器", re.IGNORECASE)),
+    ("ADSL", re.compile(r"ADSL|铜缆|电话线", re.IGNORECASE)),
+]
+
+# 移网速率语境（5G-A 峰值速率 / 移动上网速率 / 网络最高下行等），命中则跳过该带宽候选，
+# 避免把移网速率（下行3Gbps）误当宽带带宽。裸"网络"不算（HFC网络/FTTH网络是宽带接入网）。
+MOBILE_SPEED_MARKERS = re.compile(r"移动|5G|移网|上网|峰值速率|网络最高")
+
+
+def _is_mobile_speed_context(text: str, match_start: int) -> bool:
+    """True if the 15 chars before match_start suggest a mobile-network speed phrase."""
+    pre = text[max(0, match_start - 15) : match_start]
+    return bool(MOBILE_SPEED_MARKERS.search(pre))
+
+
+def extract_access_method(row: dict[str, Any]) -> str | None:
+    """接入方式归一化：FTTR / 光纤 / 同轴(HFC) / 无线(FWA) / ADSL；无线索返回 None。"""
+    if not row.get("is_broadband"):
+        return None
+    for field in ("broadband", "plan_name", "service_content"):
+        text = str(row.get(field) or "")[:400]
+        for label, pattern in ACCESS_METHOD_RULES:
+            if pattern.search(text):
+                return label
+    return None
+
+
+def extract_broadband_mbps(row: dict[str, Any]) -> int | None:
+    """下行带宽（Mbps）。从 broadband 字段/套餐名/资费内容提取并取最大值。
+
+    规则：
+      - broadband 字段与套餐名中的 ``N M`` 直接识别（1000M、1000M（上行40M）、一条1000M宽带）；
+      - ``千兆``/``万兆`` 映射 1000/10000；``N Gbps`` 按 1000 倍换算（``5G套餐`` 里的 5G 不换算）；
+      - 前两层未命中时，仅在 service_content 的带宽语境（下行/提速/速率/带宽）附近识别，
+        避免把流量数字（20GB）误当带宽。
+    """
+    if not row.get("is_broadband"):
+        return None
+    bb = str(row.get("broadband") or "")
+    name = str(row.get("plan_name") or "")
+    content = str(row.get("service_content") or "")[:400]
+
+    candidates: list[float] = []
+    for text in (bb, name):
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*M(?![0-9A-Za-z])", text):
+            if not _is_mobile_speed_context(text, m.start()):
+                candidates.append(float(m.group(1)))
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*Gbps?(?![0-9A-Za-z])", text, re.IGNORECASE):
+            if not _is_mobile_speed_context(text, m.start()):
+                candidates.append(float(m.group(1)) * 1000)
+        if "千兆" in text:
+            candidates.append(1000.0)
+        if "万兆" in text:
+            candidates.append(10000.0)
+
+    if not candidates:
+        for m in re.finditer(
+            r"(?:下行(?:最高|速率|可达)?|提速(?:至|到)?|速率|带宽)"
+            r"[^，。；（）]{0,10}?(\d+(?:\.\d+)?)\s*Mbps?(?![0-9A-Za-z])",
+            content,
+            re.IGNORECASE,
+        ):
+            if not _is_mobile_speed_context(content, m.start()):
+                candidates.append(float(m.group(1)))
+        for m in re.finditer(
+            r"(?:下行(?:最高|速率|可达)?|提速(?:至|到)?|速率|带宽)"
+            r"[^，。；（）]{0,10}?(\d+(?:\.\d+)?)\s*(?:Gbps?|GB)(?![0-9A-Za-z])",
+            content,
+            re.IGNORECASE,
+        ):
+            if not _is_mobile_speed_context(content, m.start()):
+                candidates.append(float(m.group(1)) * 1000)
+        # 宽带实体语境：加装/第二条/含一条…后紧跟的带宽数字（bb 字段被截断时兜底）
+        for m in re.finditer(
+            r"(?:宽带|光网|光纤|加装|第二条|一条|含一条|包含|含)[^，。；（）]{0,10}?"
+            r"(\d+(?:\.\d+)?)\s*M(?![0-9A-Za-z])",
+            content,
+        ):
+            if not _is_mobile_speed_context(content, m.start()):
+                candidates.append(float(m.group(1)))
+
+    if not candidates:
+        return None
+    return int(round(max(candidates)))
+
+
 def classify(row: dict[str, Any]) -> dict[str, Any]:
     """Return (publishable, default_show, reason)."""
     out = fix_region(row)
@@ -179,6 +269,8 @@ def classify(row: dict[str, Any]) -> dict[str, Any]:
     out["restricted"] = is_restricted(row)
     out["quality_flags"] = quality_flags(row)
     out["is_broadband"] = is_broadband(row)
+    out["broadband_mbps"] = extract_broadband_mbps(out)
+    out["access_method"] = extract_access_method(out)
 
     plan_type = str(out.get("plan_type") or "套餐")
     fee = out.get("monthly_fee")

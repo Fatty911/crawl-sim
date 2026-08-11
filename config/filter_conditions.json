@@ -41,6 +41,15 @@
       ]
     },
     {
+      "id": "broadband",
+      "label": "宽带",
+      "view": "broadband",
+      "conditions": [
+        {"id": "bandwidth", "label": "带宽下限", "type": "range", "field": "broadband_mbps", "unit": "M"},
+        {"id": "access_method", "label": "接入方式", "type": "multi_select", "field": "access_method", "options": ["光纤", "FTTR", "同轴(HFC)", "无线(FWA)", "ADSL"]}
+      ]
+    },
+    {
       "id": "price_data",
       "label": "月租/流量",
       "conditions": [

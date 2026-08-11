@@ -20,6 +20,7 @@
 - **默认展示**：
   - 套餐：通用非定向流量 `>= 20G` 且月租 `<= 69 元`；
   - 流量包：通用流量 `>= 10G`、费用 `<= 30 元`、每 GB `<= 1 元`（高性价比选装包）。
+- **宽带套餐**（`is_broadband`，独立「宽带套餐」视图）：带 **带宽大小**（`broadband_mbps`，从 `broadband` 字段/套餐名/资费内容提取，移网峰值速率不计入）与 **接入方式**（`access_method`：光纤 / FTTR / 同轴(HFC) / 无线(FWA) / ADSL），前端独立筛选（带宽下限/接入方式）与排序。
 - 详情见 `config/filter_conditions.json` 与 `scripts/merge_data.py`。
 
 ## 工作流

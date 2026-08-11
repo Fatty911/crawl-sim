@@ -94,6 +94,18 @@ def check_data(report: dict[str, Any]) -> list[str]:
     report["broadband_count"] = len(bb)
     if not bb:
         errors.append("无宽带套餐数据")
+    # 宽带字段：过渡期旧 release 数据可能尚未带 broadband_mbps（字段缺失仅报告不报错）；
+    # 字段存在但全部为空视为带宽提取失效。
+    has_bw_field = any("broadband_mbps" in r for r in bb)
+    report["broadband_mbps_field"] = has_bw_field
+    if has_bw_field:
+        with_bw = [r for r in bb if r.get("broadband_mbps")]
+        report["broadband_with_bw_count"] = len(with_bw)
+        report["broadband_access_count"] = len([r for r in bb if r.get("access_method")])
+        if not with_bw:
+            errors.append("宽带行均无 broadband_mbps（带宽提取失效）")
+    else:
+        report["broadband_with_bw_count"] = None
     return errors
 
 
@@ -144,6 +156,25 @@ def check_ui(report: dict[str, Any]) -> list[str]:
             report["broadband_view_rows"] = bb_cnt
             if bb_cnt < 1:
                 errors.append("宽带套餐视图无数据行")
+            # 宽带视图表头必须含带宽/接入方式列
+            bb_head = page.evaluate(
+                """() => {
+                  const tr = document.getElementById('th-broadband');
+                  return tr ? [...tr.querySelectorAll('th')].map(x => x.innerText.trim()) : [];
+                }"""
+            )
+            report["broadband_head"] = bb_head
+            head_text = " ".join(bb_head)
+            for expect in ("带宽", "接入方式"):
+                if expect not in head_text:
+                    errors.append(f"宽带视图缺少表头: {expect}")
+            if bb_cnt > 0:
+                bb_cols = page.evaluate(
+                    "() => { const row = document.querySelector('#tbody tr'); return row ? row.querySelectorAll('td').length : 0; }"
+                )
+                report["broadband_cols"] = bb_cols
+                if bb_cols != 7:
+                    errors.append(f"宽带视图行 {bb_cols} 列 (期望 7)")
 
             # all view
             page.evaluate(

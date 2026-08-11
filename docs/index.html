@@ -9,11 +9,11 @@
 <body>
 <header>
   <h1>手机套餐资费大全</h1>
-  <p class="subtitle">四大运营商（联通/移动/电信/广电）北京及全国资费，默认展示 <b>通用流量 ≥ 20G 且月租 ≤ 69 元</b> 的套餐及高性价比流量包</p>
+  <p class="subtitle">四大运营商（联通/移动/电信/广电）北京及全国资费，默认展示 <b>通用流量 ≥ 20G 且月租 ≤ 69 元</b> 的套餐及高性价比流量包；「宽带套餐」视图独立筛选/排序，支持按 <b>带宽大小</b> 与 <b>接入方式</b>（光纤/FTTR/同轴/无线等）筛选</p>
 </header>
 
 <div class="toolbar">
-  <div class="filters" id="filters">
+  <div class="filters" id="filters-traffic">
     <label>运营商
       <select id="f-source"><option value="">全部</option></select>
     </label>
@@ -28,6 +28,23 @@
     </label>
     <label>通用流量下限
       <input type="number" id="f-traffic" placeholder="≥ GB" min="0">
+    </label>
+  </div>
+  <div class="filters" id="filters-broadband" hidden>
+    <label>运营商
+      <select id="bf-source"><option value="">全部</option></select>
+    </label>
+    <label>地区
+      <select id="bf-region"><option value="">全部</option></select>
+    </label>
+    <label>月租上限
+      <input type="number" id="bf-fee" placeholder="≤ 元" min="0">
+    </label>
+    <label>带宽下限
+      <input type="number" id="bf-bandwidth" placeholder="≥ Mbps" min="0">
+    </label>
+    <label>接入方式
+      <select id="bf-access"><option value="">全部</option></select>
     </label>
   </div>
   <div class="view-toggle">
@@ -50,7 +67,7 @@
 
 <table id="table">
   <thead>
-    <tr>
+    <tr id="th-traffic">
       <th data-sort="source">运营商<span class="sort-badge"></span></th>
       <th data-sort="plan_name">套餐名称<span class="sort-badge"></span></th>
       <th data-sort="region">地区<span class="sort-badge"></span></th>
@@ -59,6 +76,15 @@
       <th class="num" data-sort="general_traffic_gb">通用流量<span class="sort-badge"></span></th>
       <th class="num" data-sort="orient_traffic_gb">定向流量<span class="sort-badge"></span></th>
       <th class="num" data-sort="voice_minutes">语音(分)<span class="sort-badge"></span></th>
+      <th>备注</th>
+    </tr>
+    <tr id="th-broadband" hidden>
+      <th data-sort="source">运营商<span class="sort-badge"></span></th>
+      <th data-sort="plan_name">套餐名称<span class="sort-badge"></span></th>
+      <th data-sort="region">地区<span class="sort-badge"></span></th>
+      <th class="num" data-sort="monthly_fee">月租(元)<span class="sort-badge"></span></th>
+      <th class="num" data-sort="broadband_mbps">带宽<span class="sort-badge"></span></th>
+      <th data-sort="access_method">接入方式<span class="sort-badge"></span></th>
       <th>备注</th>
     </tr>
   </thead>
