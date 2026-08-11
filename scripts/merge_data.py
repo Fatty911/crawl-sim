@@ -136,6 +136,135 @@ def fix_region(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# ── multi-period fee normalization ──────────────────────────────────────
+# Many broadband plans are advertised as a one-off total price for N months
+# (e.g. "5340元五年期", "3204元/24个月", "2376元趸交合约-24月").
+# The crawler stores the raw number in monthly_fee, which mixes totals with
+# true monthly fees.  normalize_monthly_fee() detects multi-period totals and
+# converts them to an equivalent monthly rate, preserving the original as
+# original_fee and recording the billing period for UI display.
+
+_CN_YEAR_MONTHS = {"一": 12, "两": 24, "二": 24, "三": 36, "四": 48, "五": 60}
+_CN_DIGIT_MONTHS = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12}
+
+
+def _extract_period_months(name: str, valid_period: str) -> int | None:
+    """Extract the contract/billing period in months from the plan name or
+    valid_period text.
+
+    Handles patterns:
+      名称: "X元/36个月", "X元三年期", "X元两年期", "趸交…24月"
+      valid_period: "36个月", "24个月", "五年", "三年", "12个月"
+      Chinese months: "两个月" (=2), "三个月" (=3)
+    """
+    text = f"{name} {valid_period}"
+    # strip full dates first: "2029年12月31日" must not yield "12月" as the period
+    text = re.sub(r"\d{4}年\d{1,2}月\d{1,2}日", " ", text)
+    # digit months: "36个月", "24月", "/24个月"
+    m = re.search(r"/?(\d+)\s*个?月", text)
+    if m:
+        return int(m.group(1))
+    # Arabic-digit years: "3年期", "3200元3年期" — limited to 1-5 years to
+    # avoid matching dates like "2029年12月31日"
+    m = re.search(r"([1-5])\s*年期?", text)
+    if m:
+        return int(m.group(1)) * 12
+    # Chinese year: "三年期", "五年", "两年" — must be followed by 年
+    # (not just 月) to avoid false match on "两个月"
+    m = re.search(r"(一|两|二|三|四|五)\s*年(?:期|)?", text)
+    if m:
+        return _CN_YEAR_MONTHS.get(m.group(1))
+    # Chinese months: "两个月", "三个月" (value from _CN_DIGIT_MONTHS)
+    m = re.search(r"(一|两|二|三|四|五|六|七|八|九|十|十一|十二)\s*个月", text)
+    if m:
+        return _CN_DIGIT_MONTHS.get(m.group(1))
+    return None
+
+
+def normalize_monthly_fee(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert multi-period total fees to equivalent monthly rates.
+
+    Returns the row with added fields:
+      - monthly_fee: the effective monthly fee (折算 or original)
+      - original_fee: the raw fee before normalization (None if unchanged)
+      - fee_type: "monthly" | "total_period" | "prepaid_monthly_return"
+      - billing_period: str for UI display, e.g. "五年期", "36个月", "24月"
+    """
+    out = dict(row)
+    name = str(out.get("plan_name") or "")
+    valid_period = str(out.get("valid_period") or "")
+    raw_fee = out.get("monthly_fee")
+    fee_text = str(out.get("fee_text") or "")
+
+    out.setdefault("original_fee", None)
+    out.setdefault("fee_type", "monthly")
+    out.setdefault("billing_period", None)
+
+    if raw_fee is None or not isinstance(raw_fee, (int, float)) or raw_fee <= 0:
+        return out
+
+    # ── Priority 1: "月费由X优惠至Y元" → Y is the true monthly fee ──
+    m = re.search(r"月费由[\d.]+(?:元)?(?:优惠至?|降至|降为)(\d+(?:\.\d+)?)元?", name)
+    if m:
+        monthly = float(m.group(1))
+        out["original_fee"] = raw_fee if monthly != raw_fee else None
+        out["fee_type"] = "monthly"
+        out["monthly_fee"] = monthly
+        return out
+
+    # ── Priority 2: "预存X元月返Y元" → Y is the effective monthly fee ──
+    m = re.search(r"月返(\d+(?:\.\d+)?)元", name)
+    if m:
+        monthly = float(m.group(1))
+        out["original_fee"] = raw_fee
+        out["fee_type"] = "prepaid_monthly_return"
+        out["monthly_fee"] = monthly
+        # billing period from name suffix like "-24月" or valid_period
+        mp = re.search(r"-(\d+)\s*月", name)
+        if mp:
+            out["billing_period"] = f"{mp.group(1)}个月"
+        else:
+            months = _extract_period_months(name, valid_period)
+            if months:
+                out["billing_period"] = f"{months}个月"
+        return out
+
+    # ── Priority 3: total price ÷ period months ──
+    # Only apply when the plan name has strong multi-period总价 signals to
+    # avoid converting a genuine monthly fee that happens to contain digit
+    # periods (e.g. a 159元/月 plan mentioned "24个月" in valid_period).
+    months = _extract_period_months(name, valid_period)
+    is_total = (
+        "趸交" in name
+        or re.search(r"\d+(?:\.\d+)?元\s*/?\s*\d+\s*个?月", name) is not None
+        or re.search(r"年期", name) is not None
+        or re.search(r"\d+个月$", valid_period.strip()) is not None
+    )
+    if months and months > 0 and raw_fee > 100 and is_total:
+        monthly = round(raw_fee / months, 1)
+        # build billing_period label
+        # prefer explicit "X元/N个月" or "X元N年期" from the name
+        m = re.search(r"(\d+(?:\.\d+)?)元\s*/?\s*(\d+)\s*个?月", name)
+        if m:
+            out["billing_period"] = f"{m.group(2)}个月"
+        else:
+            m = re.search(r"(一|两|二|三|四|五|[1-5])\s*年期", name)
+            if m:
+                out["billing_period"] = f"{m.group(1)}年期"
+            elif months >= 12 and months % 12 == 0:
+                yrs = months // 12
+                out["billing_period"] = f"{yrs}年" if yrs > 1 else "1年"
+            else:
+                out["billing_period"] = f"{months}个月"
+        out["original_fee"] = raw_fee
+        out["fee_type"] = "total_period"
+        out["monthly_fee"] = monthly
+        return out
+
+    # ── No normalization needed ──
+    return out
+
+
 def quality_flags(row: dict[str, Any]) -> list[str]:
     """Deterministic data-quality checks. Flagged records never default-show.
 
@@ -154,7 +283,12 @@ def quality_flags(row: dict[str, Any]) -> list[str]:
         if not re.search(r"(?:[5-9]\d{2,}|\d{4,})\s*(?:GB|G|TB|T)\b", text):
             flags.append("traffic_unit_suspect")
     if fee is not None and fee > 1000:
-        flags.append("fee_outlier")
+        # After normalize_monthly_fee, monthly_fee is the effective monthly
+        # rate.  Only flag if no normalization happened (original_fee is None
+        # means the fee was already monthly).
+        orig = row.get("original_fee")
+        if orig is None and fee > 1000:
+            flags.append("fee_outlier")
     return flags
 
 
@@ -309,10 +443,11 @@ def extract_broadband_mbps(row: dict[str, Any]) -> int | None:
 def classify(row: dict[str, Any]) -> dict[str, Any]:
     """Return (publishable, default_show, reason)."""
     out = fix_region(row)
-    out["excluded_phone_contract"] = has_strong_contract(row)
-    out["restricted"] = is_restricted(row)
-    out["quality_flags"] = quality_flags(row)
-    out["is_broadband"] = is_broadband(row)
+    out = normalize_monthly_fee(out)
+    out["excluded_phone_contract"] = has_strong_contract(out)
+    out["restricted"] = is_restricted(out)
+    out["quality_flags"] = quality_flags(out)
+    out["is_broadband"] = is_broadband(out)
     out["excluded_campus"] = is_campus_broadband(out)
     out["broadband_mbps"] = extract_broadband_mbps(out)
     out["access_method"] = extract_access_method(out)

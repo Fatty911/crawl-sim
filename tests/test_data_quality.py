@@ -392,3 +392,147 @@ class TestClassify:
     def test_region_from_name(self):
         out = classify(self.base(plan_name="畅越冰激凌5G套餐129元基础版（北京）"))
         assert out["region"] == "北京"
+
+
+class TestFeeNormalization:
+    """Multi-period total fees must be converted to equivalent monthly rates."""
+
+    def base(self, **kw):
+        return {
+            "source": "中国联通",
+            "atomic_source_names": ["联通"],
+            "plan_name": "",
+            "monthly_fee": None,
+            "fee_text": "",
+            "general_traffic_gb": None,
+            "orient_traffic_gb": None,
+            "voice_minutes": None,
+            "broadband": "",
+            "plan_type": "套餐",
+            "region": "北京",
+            "service_content": "",
+            "valid_period": "",
+            **kw,
+        }
+
+    def test_total_price_five_year(self):
+        """5340元五年期 → 89.0/月"""
+        out = classify(self.base(
+            plan_name="沃长宽全家享300M标准版5340元五年期（北京）",
+            monthly_fee=5340.0,
+            valid_period="五年。到期视套餐是否在售可续约、可退订",
+        ))
+        assert out["monthly_fee"] == 89.0
+        assert out["original_fee"] == 5340.0
+        assert out["fee_type"] == "total_period"
+        assert out["billing_period"] == "五年期"
+
+    def test_total_price_slash_months(self):
+        """3204元/24个月 → 133.5/月"""
+        out = classify(self.base(
+            plan_name="联通智家臻宽带500M公众单宽带3204元/24个月（北京）",
+            monthly_fee=3204.0,
+            valid_period="24个月",
+        ))
+        assert out["monthly_fee"] == 133.5
+        assert out["original_fee"] == 3204.0
+        assert out["fee_type"] == "total_period"
+        assert out["billing_period"] == "24个月"
+
+    def test_monthly_discount_not_converted(self):
+        """月费由1719优惠至1599 → 1599 (true monthly, no conversion)"""
+        out = classify(self.base(
+            plan_name="联通智家全光臻宽带全家享10000M套餐三年期预存1000元合约月费由1719元优惠至1599元（北京）",
+            monthly_fee=1599.0,
+            valid_period="三年",
+        ))
+        assert out["monthly_fee"] == 1599.0
+        assert out["fee_type"] == "monthly"
+        assert out["original_fee"] is None
+
+    def test_monthly_return_not_total(self):
+        """预存2136元月返89元-24月 → monthly_fee=89, original=2136"""
+        out = classify(self.base(
+            plan_name="存量219档全家享500M合约-预存2136元月返89元-24月",
+            monthly_fee=2136.0,
+            valid_period="24个月",
+        ))
+        assert out["monthly_fee"] == 89.0
+        assert out["original_fee"] == 2136.0
+        assert out["fee_type"] == "prepaid_monthly_return"
+
+    def test_no_outlier_flag_after_normalization(self):
+        """折算后 monthly_fee=89, 不应触发 fee_outlier"""
+        out = classify(self.base(
+            plan_name="5340元五年期（北京）",
+            monthly_fee=5340.0,
+            valid_period="五年",
+        ))
+        assert "fee_outlier" not in out["quality_flags"]
+
+    def test_normal_monthly_unchanged(self):
+        """Regular 69元套餐 should be unchanged"""
+        out = classify(self.base(
+            plan_name="畅越冰激凌5G套餐69元",
+            monthly_fee=69.0,
+            general_traffic_gb=20,
+        ))
+        assert out["monthly_fee"] == 69.0
+        assert out["fee_type"] == "monthly"
+        assert out["original_fee"] is None
+        assert out["billing_period"] is None
+
+    def test_valid_period_only_period(self):
+        """名称无期数，但 valid_period 有"36个月" → 按该期数折算"""
+        out = classify(self.base(
+            plan_name="5G全家享189元套餐2484元趸交合约",
+            monthly_fee=2484.0,
+            valid_period="36个月",
+        ))
+        assert out["monthly_fee"] == 69.0
+        assert out["fee_type"] == "total_period"
+        assert out["original_fee"] == 2484.0
+
+    def test_total_no_slash(self):
+        """无斜杠形式 3204元24个月 也应识别为总价"""
+        out = classify(self.base(
+            plan_name="联通智家臻宽带500M公众单宽带3204元24个月（北京）",
+            monthly_fee=3204.0,
+            valid_period="24个月",
+        ))
+        assert out["monthly_fee"] == 133.5
+        assert out["fee_type"] == "total_period"
+        assert out["billing_period"] == "24个月"
+
+    def test_total_arabic_year(self):
+        """阿拉伯数字年期 3200元3年期 也应识别为总价"""
+        out = classify(self.base(
+            plan_name="联通智家臻宽带300M单宽带3200元3年期（北京）",
+            monthly_fee=3200.0,
+            valid_period="3年。到期视套餐是否在售可续约、可退订",
+        ))
+        assert out["monthly_fee"] == round(3200.0 / 36, 1)
+        assert out["fee_type"] == "total_period"
+        assert out["billing_period"] == "3年期"
+
+    def test_date_in_valid_period_not_parsed(self):
+        """valid_period 含日期（2029年12月31日）不应被提取为周期"""
+        out = classify(self.base(
+            plan_name="畅越冰激凌5G套餐129元基础版",
+            monthly_fee=129.0,
+            valid_period="至2029年12月31日",
+        ))
+        assert out["monthly_fee"] == 129.0
+        assert out["fee_type"] == "monthly"
+        assert out["billing_period"] is None
+
+    def test_arabic_year_with_date_valid_period(self):
+        """总价+阿拉伯年期+有效期含日期：优先年期而非日期中的12月"""
+        out = classify(self.base(
+            plan_name="联通智家臻宽带300M单宽带3200元3年期（北京）",
+            monthly_fee=3200.0,
+            valid_period="至2029年12月31日",
+        ))
+        assert out["monthly_fee"] == round(3200.0 / 36, 1)
+        assert out["fee_type"] == "total_period"
+        assert out["billing_period"] == "3年期"

@@ -179,8 +179,8 @@ def check_ui(report: dict[str, Any]) -> list[str]:
                     "() => { const row = document.querySelector('#tbody tr'); return row ? row.querySelectorAll('td').length : 0; }"
                 )
                 report["broadband_cols"] = bb_cols
-                if bb_cols != 8:
-                    errors.append(f"宽带视图行 {bb_cols} 列 (期望 8)")
+                if bb_cols != 9:
+                    errors.append(f"宽带视图行 {bb_cols} 列 (期望 9)")
 
             # all view
             page.evaluate(

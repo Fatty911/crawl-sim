@@ -22,6 +22,7 @@
       { field: "source", label: "运营商" },
       { field: "region", label: "地区" },
       { field: "monthly_fee", label: "月租" },
+      { field: "billing_period", label: "计费周期" },
       { field: "general_traffic_gb", label: "通用流量" },
       { field: "broadband_mbps", label: "带宽" },
       { field: "access_method", label: "接入方式" },
@@ -67,6 +68,15 @@
   function fmtFee(r) {
     if (r.monthly_fee == null) return "-";
     return r.monthly_fee % 1 === 0 ? r.monthly_fee : r.monthly_fee.toFixed(1);
+  }
+  function fmtFeeTitle(r) {
+    if (r.original_fee != null && r.fee_type === "total_period") {
+      return `${r.original_fee}元 / ${r.billing_period || ""}`;
+    }
+    if (r.fee_type === "prepaid_monthly_return" && r.original_fee != null) {
+      return `预存${r.original_fee}元，月返${r.monthly_fee}元`;
+    }
+    return "";
   }
   function fmtGb(v) {
     if (v == null) return "-";
@@ -264,7 +274,7 @@
     $("count").textContent = `${rows.length} 条`;
     tbody.innerHTML = "";
     if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="${bb ? 8 : 9}" class="empty">暂无符合条件的数据</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">暂无符合条件的数据</td></tr>`;
       renderHeaderIndicators();
       return;
     }
@@ -277,7 +287,8 @@
           `<td class="${cls}">${esc(r.source)}</td>` +
           `<td><b>${esc(r.plan_name)}</b><br>${tags(r)}</td>` +
           `<td>${esc(r.region)}</td>` +
-          `<td class="num"><b>${fmtFee(r)}</b></td>` +
+          `<td class="num" title="${esc(fmtFeeTitle(r))}"><b>${fmtFee(r)}</b></td>` +
+          `<td>${esc(r.billing_period || "-")}</td>` +
           `<td class="num">${fmtGb(r.general_traffic_gb)}</td>` +
           `<td class="num"><b>${fmtBw(r)}</b></td>` +
           `<td>${esc(r.access_method || "-")}</td>` +
