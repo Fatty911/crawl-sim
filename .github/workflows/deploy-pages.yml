@@ -194,16 +194,45 @@ jobs:
             --output "$RUNNER_TEMP/pages-audit-report.json" \
             --prompt "$RUNNER_TEMP/pages-audit-prompt.md"
 
+      - name: Probe NIM endpoint availability
+        id: probe_nim
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+        run: |
+          # 免费端点可用性每周变化：审查前先探测（529 风控重试 3 次）
+          for i in 1 2 3; do
+            code=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" \
+              https://integrate.api.nvidia.com/v1/models \
+              -H "Authorization: Bearer $NVIDIA_NIM_API_KEY")
+            echo "NIM probe attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "nim_ok=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "nim_ok=false" >> "$GITHUB_OUTPUT"
+
       - name: AI review audit report
         id: ai_review
         continue-on-error: true
         env:
-          ZENMUX_API_KEY: ${{ secrets.ZENMUX_API_KEY }}
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
           DMIT_PROXY_URL: ${{ secrets.DMIT_PROXY_URL }}
+          PROBE_NIM_OK: ${{ steps.probe_nim.outputs.nim_ok }}
         run: |
           python - <<'PY'
-          import json, os, subprocess
+          import json, os, subprocess, time
           prompt_file = os.path.join(os.environ["RUNNER_TEMP"], "pages-audit-prompt.md")
+          # 探测结果作为运行时门禁：NIM 端点不可用 → 直接强制 NEEDS_ATTENTION（不空跑 AI）
+          if os.environ.get("PROBE_NIM_OK", "") != "true":
+              msg = "AI 页面审计：NIM 端点探测失败（probe_nim），审查无法执行，需人工查看 run 日志"
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(json.dumps({"conclusion": "NEEDS_ATTENTION", "summary": msg, "real_issues": [{"severity": "error", "item": "nim probe", "reason": msg, "suggestion": "检查 NVIDIA_NIM_API_KEY 与端点可用性"}], "forced": True}, ensure_ascii=False, indent=1))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              print("NIM probe failed -> forced NEEDS_ATTENTION")
+              raise SystemExit(0)
           # 审计收集失败（无报告/prompt）时不得静默吞掉：强制 NEEDS_ATTENTION
           if not os.path.isfile(prompt_file):
               msg = "AI 页面审计：审计收集步骤失败（未生成报告），需人工查看 run 日志"
@@ -217,13 +246,15 @@ jobs:
               "*": "deny", "read": "allow", "edit": "deny", "bash": "deny",
               "webfetch": "deny", "task": "deny", "question": "deny", "external_directory": "deny",
           }
+          # zenmux key 未授权 deepseek-v4-flash（403 access_denied，2026-08-11 实测），
+          # 审查改用 NIM 免费端点（deepseek-ai/deepseek-v4-flash-0731，secret 已有）
           config = {
               "provider": {
-                  "zenmux": {
+                  "nvidia-nim": {
                       "npm": "@ai-sdk/openai-compatible",
-                      "name": "zenmux",
-                      "options": {"baseURL": "https://zenmux.ai/api/v1", "apiKey": "{env:ZENMUX_API_KEY}"},
-                      "models": {"deepseek-v4-flash": {"limit": {"context": 1000000, "output": 8000}}},
+                      "name": "nvidia-nim",
+                      "options": {"baseURL": "https://integrate.api.nvidia.com/v1", "apiKey": "{env:NVIDIA_NIM_API_KEY}"},
+                      "models": {"deepseek-ai/deepseek-v4-flash-0731": {"limit": {"context": 1000000, "output": 8000}}},
                   }
               },
               "agent": {"plan": {"permission": read_only}},
@@ -240,25 +271,39 @@ jobs:
               env["HTTP_PROXY"] = proxy
           cmd = [
               "opencode", "run", "--pure", "--agent", "plan",
-              "--model", "zenmux/deepseek-v4-flash",
+              "--model", "nvidia-nim/deepseek-ai/deepseek-v4-flash-0731",
               "--format", "default", "--dir", os.environ["RUNNER_TEMP"],
               "Review the attached page-audit report. Output ONLY the requested JSON (no markdown fence, no extra text).",
               "--file", prompt_file,
           ]
-          try:
-              out = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=840)
-          except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-              # 超时/启动异常：continue-on-error 会吞掉异常，必须显式强制 NEEDS_ATTENTION
+          out = None
+          last_err = ""
+          # NIM 从 runner IP 有 529 风控（记忆 2026-08-02 实测）：初次调用 + 3 次重试 + 封顶退避
+          # 探测步骤（probe_nim）已确认端点可达才走到这里；探测失败时 subprocess 调用
+          # 会失败进入重试，重试耗尽后强制 NEEDS_ATTENTION（兜底不静默）
+          for attempt in range(1, 5):
+              try:
+                  out = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=840)
+                  if out.returncode == 0 and out.stdout.strip():
+                      break
+                  last_err = f"exit={out.returncode} stderr={out.stderr[-200:]!r}"
+              except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+                  last_err = f"{type(exc).__name__}: {str(exc)[:150]}"
+              print(f"NIM review attempt {attempt} failed: {last_err}")
+              if attempt < 4:
+                  time.sleep(30 * attempt)
+          if out is None or out.returncode != 0 or not out.stdout.strip():
+              # 重试耗尽：continue-on-error 会吞掉异常，必须显式强制 NEEDS_ATTENTION
               forced = {"conclusion": "NEEDS_ATTENTION",
-                        "summary": f"AI 页面审计：opencode 调用失败（{type(exc).__name__}），需人工查看 run 日志",
-                        "real_issues": [{"severity": "error", "item": "ai review", "reason": f"{type(exc).__name__}: {str(exc)[:200]}",
+                        "summary": f"AI 页面审计：opencode(NIM) 调用失败（{last_err}），需人工查看 run 日志",
+                        "real_issues": [{"severity": "error", "item": "ai review", "reason": last_err,
                                          "suggestion": "查看 workflow run 日志与 pages-ai-audit artifact"}],
                         "forced": True}
               with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
                   fh.write(json.dumps(forced, ensure_ascii=False, indent=1))
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
                   fh.write("needs_attention=true\n")
-              print(f"opencode call failed ({type(exc).__name__}) -> forced NEEDS_ATTENTION")
+              print("opencode(NIM) call failed after retries -> forced NEEDS_ATTENTION")
               raise SystemExit(0)
           ai_text = out.stdout.strip()
           with open(os.path.join(os.environ["RUNNER_TEMP"], "ai-review.md"), "w", encoding="utf-8") as fh:
