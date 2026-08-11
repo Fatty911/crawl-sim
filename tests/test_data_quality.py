@@ -168,6 +168,107 @@ class TestBroadband:
         assert out["default_show"] is False
 
 
+class TestBroadbandJudgement:
+    """service_content 里的"宽带"字样不能误判为宽带产品（功能描述/否定语境）。"""
+
+    def base(self, **kw):
+        row = {"plan_name": "测试", "broadband": "", "use_scope": "", "service_content": ""}
+        row.update(kw)
+        return row
+
+    def test_marketing_negation_not_broadband(self):
+        row = self.base(plan_name="动感地带萌卡-10元",
+                        service_content="2、福建：不可同时办理所有营销案(含宽带群组保底业务)3、安徽智慧家庭礼包添加本产品不支持流量语音资源共享")
+        assert is_broadband(row) is False
+
+    def test_security_function_not_broadband(self):
+        row = self.base(plan_name="5G联通安全管家基础版",
+                        service_content="产品内包含2GB全国流量、5G基础速率服务和联通安全管家(包含通话安全、短信安全、亲情守护-手机上网安全、亲情守护-宽带上网安全功能)")
+        assert is_broadband(row) is False
+
+    def test_exclusive_listing_not_broadband(self):
+        row = self.base(plan_name="四足机器人尊享版",
+                        service_content="本活动与硬件类、宽带、权益类等部分合约方案互斥")
+        assert is_broadband(row) is False
+
+    def test_real_broadband_in_content(self):
+        row = self.base(plan_name="家庭套餐", service_content="含一条100M宽带。")
+        assert is_broadband(row) is True
+
+    def test_speedup_in_content(self):
+        row = self.base(plan_name="影音包", service_content="合约到期2000M宽带提速自动恢复原价")
+        assert is_broadband(row) is True
+
+    def test_ftth_in_content(self):
+        row = self.base(plan_name="双网影音包",
+                        service_content="1）HFC网络：下行200Mbps/上行11Mbps；FTTH网络：下行200Mbps/上行40Mbps")
+        assert is_broadband(row) is True
+
+
+class TestCampusExclusion:
+    """校园专属宽带（限制高校区域）标记 excluded_campus，不进公开 Pages。"""
+
+    def base(self, **kw):
+        row = {
+            "source": "中国联通", "plan_name": "测试", "report_no": "T1",
+            "region": "全国", "plan_type": "套餐",
+            "monthly_fee": 59, "general_traffic_gb": 30,
+            "orient_traffic_gb": 0, "voice_minutes": 100, "sms": 0,
+            "contract": False, "service_content": "", "contract_desc": "",
+            "use_scope": "全网用户", "broadband": "",
+        }
+        row.update(kw)
+        return row
+
+    def test_campus_broadband_marked(self):
+        out = classify(self.base(plan_name="联通智家沃派校园专属套餐宽带100M0元/年（北京）", broadband="100M",
+                                 use_scope="北京校园沃派用户且宽带校园内使用"))
+        assert out["is_broadband"] is True
+        assert out["excluded_campus"] is True
+
+    def test_campus_in_scope_only(self):
+        out = classify(self.base(plan_name="校园宽带300M一年", broadband="300M",
+                                 use_scope="校园用户可办理"))
+        assert out["excluded_campus"] is True
+
+    def test_campus_data_pack_not_excluded(self):
+        # 校园流量卡等非宽带产品不在本次排除范围
+        out = classify(self.base(plan_name="校园流量包10元", plan_type="流量包", broadband="",
+                                 use_scope="校园用户", general_traffic_gb=20))
+        assert out["excluded_campus"] is False
+
+    def test_normal_broadband_not_excluded(self):
+        out = classify(self.base(plan_name="300M宽带一年期", broadband="300M", use_scope="全网用户"))
+        assert out["excluded_campus"] is False
+
+
+class TestBroadnetYearlyTierPrice:
+    """广电"一年…XX元档"年付档位价兜底（API productPrice 对档位产品不可靠）。"""
+
+    def test_tier_price_extracted(self):
+        assert crawl_broadnet._yearly_tier_price("一年100M靓号宽带双享包48元档") == 48.0
+        assert crawl_broadnet._yearly_tier_price("一年200M双网影音包38元档") == 38.0
+        assert crawl_broadnet._yearly_tier_price("一年300M靓号宽带双享包68元档") == 68.0
+
+    def test_no_tier_no_extract(self):
+        assert crawl_broadnet._yearly_tier_price("一年300M宽带5G套餐") is None
+        assert crawl_broadnet._yearly_tier_price("59元元气卡") is None
+
+    def test_normalize_uses_tier_price(self):
+        raw = {
+            "productName": "一年100M靓号宽带双享包48元档",
+            "productPrice": 10000,  # 源站返回统一基础价 10000 分/年，不可靠
+            "productPriceUnit": "年",
+            "parentTypeCode": "GZ_TC_KD",
+            "domesticTraffic": 0, "orientTraffic": 0, "domesticCall": 0, "sms": 0,
+            "otherContent": "", "tariffAttr": "", "validPeriod": "12个月，到期自动失效",
+            "saleChannel": "", "applicablePeople": "", "onlineDay": "", "offlineDay": "",
+            "filingNumber": "26BJ500009",
+        }
+        row = crawl_broadnet.normalize(raw, "北京")
+        assert row["monthly_fee"] == 4.0, f"48元档/年 -> 4.0 元/月, got {row['monthly_fee']}"
+
+
 class TestBroadbandFields:
     """宽带带宽大小（broadband_mbps）与接入方式（access_method）提取。"""
 

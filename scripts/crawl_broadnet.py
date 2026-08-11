@@ -111,6 +111,19 @@ def fetch_all(s: requests.Session, area_code: str, region_label: str) -> list[di
     return rows
 
 
+def _yearly_tier_price(name: str) -> float | None:
+    """产品名里的年付档位价（如 一年100M靓号宽带双享包48元档 → 48 元/年）。
+
+    广电资费公示中"一年…XX元档"命名携带真实档位价；API 的 productPrice
+    对档位产品常返回统一基础价（2026-08-11 实测 48/58/68 元档三产品均为
+    10000 分/年），不可靠，需用档位价兜底。
+    """
+    m = re.search(r"一年.{0,20}?(\d+(?:\.\d+)?)\s*元档", name)
+    if not m:
+        return None
+    return float(m.group(1))
+
+
 def normalize(raw: dict[str, Any], region: str) -> dict[str, Any]:
     name = str(raw.get("productName") or "").strip()
     fee = _num(raw.get("productPrice"))  # unit: 分
@@ -119,7 +132,11 @@ def normalize(raw: dict[str, Any], region: str) -> dict[str, Any]:
     fee_yuan = None
     if fee is not None:
         if fee_unit == "年":
-            fee_yuan = round(fee / 100 / 12, 2)
+            tier = _yearly_tier_price(name)
+            if tier is not None:
+                fee_yuan = round(tier / 12, 2)
+            else:
+                fee_yuan = round(fee / 100 / 12, 2)
         else:
             fee_yuan = round(fee / 100, 2)
     traffic = _num(raw.get("domesticTraffic"))

@@ -22,6 +22,7 @@
       { field: "source", label: "运营商" },
       { field: "region", label: "地区" },
       { field: "monthly_fee", label: "月租" },
+      { field: "general_traffic_gb", label: "通用流量" },
       { field: "broadband_mbps", label: "带宽" },
       { field: "access_method", label: "接入方式" },
       { field: "plan_name", label: "套餐名称" },
@@ -263,7 +264,7 @@
     $("count").textContent = `${rows.length} 条`;
     tbody.innerHTML = "";
     if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="${bb ? 7 : 9}" class="empty">暂无符合条件的数据</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="${bb ? 8 : 9}" class="empty">暂无符合条件的数据</td></tr>`;
       renderHeaderIndicators();
       return;
     }
@@ -277,6 +278,7 @@
           `<td><b>${esc(r.plan_name)}</b><br>${tags(r)}</td>` +
           `<td>${esc(r.region)}</td>` +
           `<td class="num"><b>${fmtFee(r)}</b></td>` +
+          `<td class="num">${fmtGb(r.general_traffic_gb)}</td>` +
           `<td class="num"><b>${fmtBw(r)}</b></td>` +
           `<td>${esc(r.access_method || "-")}</td>` +
           `<td class="note" title="${esc(note(r))}">${esc(note(r))}</td>`;

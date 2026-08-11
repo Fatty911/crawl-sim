@@ -94,6 +94,12 @@ def check_data(report: dict[str, Any]) -> list[str]:
     report["broadband_count"] = len(bb)
     if not bb:
         errors.append("无宽带套餐数据")
+    # 校园专属宽带（限制高校区域）不得进入公开 Pages
+    campus = [r for r in rows if r.get("excluded_campus")]
+    report["campus_excluded_count"] = len(campus)
+    if campus:
+        names = "、".join(str(r.get("plan_name", ""))[:18] for r in campus[:3])
+        errors.append(f"发布数据含 {len(campus)} 条校园专属宽带（不应进入 Pages）: {names}")
     # 宽带字段：过渡期旧 release 数据可能尚未带 broadband_mbps（字段缺失仅报告不报错）；
     # 字段存在但全部为空视为带宽提取失效。
     has_bw_field = any("broadband_mbps" in r for r in bb)
@@ -173,8 +179,8 @@ def check_ui(report: dict[str, Any]) -> list[str]:
                     "() => { const row = document.querySelector('#tbody tr'); return row ? row.querySelectorAll('td').length : 0; }"
                 )
                 report["broadband_cols"] = bb_cols
-                if bb_cols != 7:
-                    errors.append(f"宽带视图行 {bb_cols} 列 (期望 7)")
+                if bb_cols != 8:
+                    errors.append(f"宽带视图行 {bb_cols} 列 (期望 8)")
 
             # all view
             page.evaluate(

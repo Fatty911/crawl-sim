@@ -160,6 +160,30 @@ def quality_flags(row: dict[str, Any]) -> list[str]:
 
 BROADBAND_KEYWORDS = ["宽带", "光纤", "FTTH", "全光", "单宽", "方宽", "长宽"]
 
+# service_content 中"宽带"字样不一定是宽带产品：营销文案常见功能描述/否定语境
+# （"亲情守护-宽带上网安全"、"不可同时办理含宽带的营销案"）。
+# content 命中规则：速率+宽带、宽带+产品词、含/加装等实体前缀；并排除否定前缀窗口。
+BROADBAND_CONTENT_PATTERN = re.compile(
+    r"\d+(?:\.\d+)?\s*M\s*宽带"
+    r"|宽带(?:融合|套餐|提速|包年|包月|一年|两年|单月|光网|千兆|速率|光纤)"
+    r"|(?:含|加装|叠加|绑定|融合|赠送|送|提供|可办理|可叠加|开通|办理|新增|增配|第二条|含一条)[^，。；（）]{0,10}宽带"
+    r"|光纤|FTTH|FTTR|全光|单宽|方宽|长宽"
+)
+BROADBAND_NEGATION_PREFIX = (
+    "不可", "不支持", "不含", "不能", "无需", "不得", "互斥", "禁止", "排除", "不适用", "无法", "不提供",
+)
+
+
+def _content_is_broadband(content: str) -> bool:
+    """service_content 是否表达宽带产品实体（排除否定与功能描述语境）。"""
+    for m in BROADBAND_CONTENT_PATTERN.finditer(content):
+        # 否定词检查覆盖匹配点前后（"…与FTTR类、宽带类…互斥"的互斥在后方）
+        window = content[max(0, m.start() - 20) : min(len(content), m.end() + 25)]
+        if any(n in window for n in BROADBAND_NEGATION_PREFIX):
+            continue
+        return True
+    return False
+
 
 def is_broadband(row: dict[str, Any]) -> bool:
     """True if the plan includes broadband (standalone or bundled with mobile)."""
@@ -168,8 +192,28 @@ def is_broadband(row: dict[str, Any]) -> bool:
     content = str(row.get("service_content") or "")[:200]
     if broadband and broadband not in ("无", "0", "-"):
         return True
-    text = f"{name} {content}"
-    return any(kw in text for kw in BROADBAND_KEYWORDS)
+    if any(kw in name for kw in BROADBAND_KEYWORDS):
+        return True
+    return _content_is_broadband(content)
+
+
+CAMPUS_KEYWORDS = ("校园", "高校", "学生")
+
+
+def is_campus_broadband(row: dict[str, Any]) -> bool:
+    """校园专属宽带（限制高校区域/校园内使用），不应进入公开 Pages。
+
+    依据运营商 use_scope 实测：\"校园用户可办理\"、\"北京校园沃派用户且宽带校园内使用\"、
+    \"北京联通WiFi新融合进线的高校学生用户\"——均为高校区域限定，普通用户不可办。
+    仅对宽带行生效；校园流量卡等非宽带产品不在本次排除范围。
+    """
+    if not row.get("is_broadband"):
+        return False
+    text = " ".join(
+        str(row.get(field) or "")
+        for field in ("plan_name", "use_scope", "service_content", "broadband")
+    )[:300]
+    return any(kw in text for kw in CAMPUS_KEYWORDS)
 
 
 ACCESS_METHOD_RULES: list[tuple[str, re.Pattern[str]]] = [
@@ -269,6 +313,7 @@ def classify(row: dict[str, Any]) -> dict[str, Any]:
     out["restricted"] = is_restricted(row)
     out["quality_flags"] = quality_flags(row)
     out["is_broadband"] = is_broadband(row)
+    out["excluded_campus"] = is_campus_broadband(out)
     out["broadband_mbps"] = extract_broadband_mbps(out)
     out["access_method"] = extract_access_method(out)
 
