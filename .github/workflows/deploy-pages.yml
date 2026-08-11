@@ -429,4 +429,4 @@ jobs:
             fi
           done <<< "$ISSUES"
           echo "closed audit issues: $CLOSED"
-          [ "$FAILED" = "1" ] && exit 1
+          if [ "$FAILED" = "1" ]; then exit 1; fi
