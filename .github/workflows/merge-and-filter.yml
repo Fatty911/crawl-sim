@@ -113,10 +113,11 @@ jobs:
           rows = json.load(open('dist/merged.json', encoding='utf-8'))
           shown = [r for r in rows if r.get('default_show')]
           # 校园专属宽带（限制高校区域）不进入公开 Pages
-          publishable = [r for r in rows if not r.get('excluded_campus')]
+          # 月租>200 元高端套餐（非富即贵）也不进入
+          publishable = [r for r in rows if not r.get('excluded_campus') and not r.get('excluded_high_fee')]
           json.dump(shown, open('dist/latest.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
           json.dump(publishable, open('dist/filtered.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
-          print(f"latest.json={len(shown)} filtered.json={len(publishable)} (campus excluded={len(rows)-len(publishable)})")
+          print(f"latest.json={len(shown)} filtered.json={len(publishable)} (excluded campus={len(rows)-len(publishable)})")
           PY
 
       - name: Publish Release

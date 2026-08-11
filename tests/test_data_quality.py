@@ -536,3 +536,82 @@ class TestFeeNormalization:
         assert out["monthly_fee"] == round(3200.0 / 36, 1)
         assert out["fee_type"] == "total_period"
         assert out["billing_period"] == "3年期"
+
+    def test_year_pack(self):
+        """流量年包 350 元 → 350/12≈29.2/月"""
+        out = classify(self.base(
+            plan_name="流量年包",
+            monthly_fee=350.0,
+            valid_period="365天",
+        ))
+        assert out["monthly_fee"] == round(350.0 / 12, 1)
+        assert out["fee_type"] == "total_period"
+        assert out["billing_period"] == "1年"
+
+    def test_half_year_pack(self):
+        """流量半年包 230 元 → 230/6≈38.3/月"""
+        out = classify(self.base(
+            plan_name="流量半年包",
+            monthly_fee=230.0,
+            valid_period="180天",
+        ))
+        assert out["monthly_fee"] == round(230.0 / 6, 1)
+        assert out["fee_type"] == "total_period"
+
+    def test_prepaid_two_year_contract(self):
+        """预存988元…两年合约（无“期”字）→ 988/24≈41.2/月"""
+        out = classify(self.base(
+            plan_name="联通沃派校园5G套餐预存988元5G-A包两年合约（北京）",
+            monthly_fee=988.0,
+            valid_period="两年",
+        ))
+        assert out["monthly_fee"] == round(988.0 / 24, 1)
+        assert out["fee_type"] == "total_period"
+        assert out["billing_period"] == "2年"
+
+    def test_monthly_plan_with_two_year_valid_not_converted(self):
+        """月费档套餐（239元套餐）名称无年期信号，valid 里的“两年”不得触发折算"""
+        out = classify(self.base(
+            plan_name="联通臻宽带239元套餐预存得960元电子券24个月合约（北京）",
+            monthly_fee=239.0,
+            valid_period="两年。到期视套餐是否在售可续约、可退订",
+        ))
+        assert out["monthly_fee"] == 239.0
+        assert out["fee_type"] == "monthly"
+
+    def test_high_fee_excluded(self):
+        """月租>200 标记 excluded_high_fee（不进 Pages）"""
+        out = classify(self.base(
+            plan_name="联通智家全光臻宽带全家享1719元档（标准原价）套餐5G-A移网主卡（北京）",
+            monthly_fee=1719.0,
+        ))
+        assert out["excluded_high_fee"] is True
+
+    def test_fee_200_boundary_kept(self):
+        """月租恰为 200 元不排除"""
+        out = classify(self.base(
+            plan_name="畅越冰激凌5G套餐200元",
+            monthly_fee=200.0,
+        ))
+        assert out["excluded_high_fee"] is False
+
+    def test_converted_fee_not_excluded(self):
+        """折算后 89 元（原5340元五年期）不应被排除"""
+        out = classify(self.base(
+            plan_name="沃长宽全家享300M标准版5340元五年期（北京）",
+            monthly_fee=5340.0,
+            valid_period="五年",
+        ))
+        assert out["monthly_fee"] == 89.0
+        assert out["excluded_high_fee"] is False
+
+    def test_monthly_plan_with_24mo_valid_not_converted(self):
+        """月费档套餐 valid_period 以“24个月”结尾不得折算（is_total 只用 name）"""
+        out = classify(self.base(
+            plan_name="畅越冰激凌5G套餐219元",
+            monthly_fee=219.0,
+            valid_period="24个月，到期视套餐是否在售可续约",
+        ))
+        assert out["monthly_fee"] == 219.0
+        assert out["fee_type"] == "monthly"
+        assert out["excluded_high_fee"] is True  # 219>200 仍会被过滤，但不折算

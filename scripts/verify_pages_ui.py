@@ -57,6 +57,12 @@ def check_data(report: dict[str, Any]) -> list[str]:
     if len(report["sources"]) < 3:
         errors.append(f"数据源不足: {report['sources']} (< 3)")
 
+    # 月租>200 高端套餐不得出现在发布数据（非富即贵过滤）
+    high_fee = [r.get("plan_name", "") for r in rows if (r.get("monthly_fee") or 0) > 200]
+    report["high_fee_rows"] = len(high_fee)
+    if high_fee:
+        errors.append(f"发布数据含月租>200 元套餐 {len(high_fee)} 条: {high_fee[:2]}")
+
     shown = [r for r in rows if r.get("default_show")]
     report["default_show_count"] = len(shown)
     if len(shown) < 5:

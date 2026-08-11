@@ -160,6 +160,12 @@ def _extract_period_months(name: str, valid_period: str) -> int | None:
     text = f"{name} {valid_period}"
     # strip full dates first: "2029年12月31日" must not yield "12月" as the period
     text = re.sub(r"\d{4}年\d{1,2}月\d{1,2}日", " ", text)
+    # yearly/half-year packs: "流量年包" (=12), "流量半年包" (=6) — check
+    # 半年包 before 年包 since it contains the substring
+    if re.search(r"半年包", name):
+        return 6
+    if re.search(r"年包", name):
+        return 12
     # digit months: "36个月", "24月", "/24个月"
     m = re.search(r"/?(\d+)\s*个?月", text)
     if m:
@@ -237,8 +243,10 @@ def normalize_monthly_fee(row: dict[str, Any]) -> dict[str, Any]:
     is_total = (
         "趸交" in name
         or re.search(r"\d+(?:\.\d+)?元\s*/?\s*\d+\s*个?月", name) is not None
-        or re.search(r"年期", name) is not None
-        or re.search(r"\d+个月$", valid_period.strip()) is not None
+        # 年期/年/两年 etc. — name only, valid_period may carry "两年。到期…"
+        # for plain monthly plans, so never use valid_period for this signal
+        or re.search(r"(?:一|两|二|三|四|五|[1-5])\s*年(?:期|合约)?", name) is not None
+        or re.search(r"年包|半年包", name) is not None
     )
     if months and months > 0 and raw_fee > 100 and is_total:
         monthly = round(raw_fee / months, 1)
@@ -449,6 +457,10 @@ def classify(row: dict[str, Any]) -> dict[str, Any]:
     out["quality_flags"] = quality_flags(out)
     out["is_broadband"] = is_broadband(out)
     out["excluded_campus"] = is_campus_broadband(out)
+    # 月租 > 200 元的高端套餐不进 Pages（用户要求：非富即贵系列不展示）
+    out["excluded_high_fee"] = bool(
+        out.get("monthly_fee") is not None and out.get("monthly_fee") > 200
+    )
     out["broadband_mbps"] = extract_broadband_mbps(out)
     out["access_method"] = extract_access_method(out)
 
