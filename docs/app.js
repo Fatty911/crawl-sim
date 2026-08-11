@@ -288,7 +288,7 @@
           `<td><b>${esc(r.plan_name)}</b><br>${tags(r)}</td>` +
           `<td>${esc(r.region)}</td>` +
           `<td class="num" title="${esc(fmtFeeTitle(r))}"><b>${fmtFee(r)}</b></td>` +
-          `<td>${esc(r.billing_period || "-")}</td>` +
+          `<td>${esc(r.billing_period || "月付")}</td>` +
           `<td class="num">${fmtGb(r.general_traffic_gb)}</td>` +
           `<td class="num"><b>${fmtBw(r)}</b></td>` +
           `<td>${esc(r.access_method || "-")}</td>` +

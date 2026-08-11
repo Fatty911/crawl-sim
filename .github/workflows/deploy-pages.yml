@@ -378,9 +378,42 @@ jobs:
         run: |
           gh label create sim-pages-audit-failed --repo "$GITHUB_REPOSITORY" \
             --color FBCA04 --description "Pages AI 审计发现需人工介入问题" 2>/dev/null || true
-          OLD=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-                --label sim-pages-audit-failed --json number --jq '.[].number' | head -1)
-          if [ -n "$OLD" ]; then gh issue close "$OLD" --repo "$GITHUB_REPOSITORY" || true; fi
+          # 先捕获 issue 列表并检查失败（进程替换不传失败）；--limit 100 防默认 30 上限
+          ISSUES=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                --label sim-pages-audit-failed --json number --jq '.[].number' --limit 100) \
+            || { echo "::error::gh issue list 失败，中止新建"; exit 1; }
+          FAILED=0
+          while IFS= read -r N; do
+            [ -z "$N" ] && continue
+            gh issue close "$N" --repo "$GITHUB_REPOSITORY" || { echo "WARN: 关闭旧 issue #$N 失败"; FAILED=1; }
+          done <<< "$ISSUES"
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::旧 sim-pages-audit-failed issue 关闭失败，中止新建避免并存"
+            exit 1
+          fi
           gh issue create --repo "$GITHUB_REPOSITORY" --title "Pages AI 审计: ${{ github.run_id }}" \
             --label sim-pages-audit-failed \
             --body "$(cat "$RUNNER_TEMP/audit-needs-attention")"
+
+      - name: Close audit issue when OK
+        if: steps.ai_review.outputs.needs_attention == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          ISSUES=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                --label sim-pages-audit-failed --json number --jq '.[].number' --limit 100) \
+            || { echo "::error::gh issue list 失败"; exit 1; }
+          CLOSED=0
+          FAILED=0
+          while IFS= read -r N; do
+            [ -z "$N" ] && continue
+            if gh issue close "$N" --repo "$GITHUB_REPOSITORY" \
+                --comment "AI 页面审计恢复 OK，自动关闭"; then
+              CLOSED=$((CLOSED + 1))
+            else
+              echo "WARN: 关闭 issue #$N 失败"
+              FAILED=1
+            fi
+          done <<< "$ISSUES"
+          echo "closed audit issues: $CLOSED"
+          [ "$FAILED" = "1" ] && exit 1

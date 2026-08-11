@@ -340,7 +340,8 @@ def main() -> int:
                     bad.append(f"bw data={r.get('broadband_mbps')} render={rendered[6]}")
                 if str(r.get("access_method") or "-") != (rendered[7] or "-"):
                     bad.append(f"access data={r.get('access_method')} render={rendered[7]}")
-                if str(r.get("billing_period") or "-") != (rendered[4] or "-"):
+                # 前端对无计费周期行显示"月付"（2026-08-11 AI 审计建议）；两侧兜底一致
+                if str(r.get("billing_period") or "月付") != str(rendered[4] or "月付"):
                     bad.append(f"period data={r.get('billing_period')} render={rendered[4]}")
                 if bad:
                     bb_mismatch.append(f"{name[:24]}: {'; '.join(bad)}")
