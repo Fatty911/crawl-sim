@@ -374,14 +374,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
     checks.append("merge_workflow")
 
     # deterministic checks
-    if run(["python", "-m", "py_compile"] + sorted(str(repo / p) for p in paths if p.endswith(".py")), repo).returncode != 0:
+    pyc = run(["python", "-m", "py_compile"] + sorted(str(repo / p) for p in paths if p.endswith(".py")), repo)
+    if pyc.returncode != 0:
+        combined = (pyc.stderr or "") + (pyc.stdout or "")
+        print(f"py_compile output:\n{combined[-2000:]}", file=sys.stderr)
         fail("py_compile failed")
     checks.append("py_compile")
 
-    # pytest if present
+    # pytest if present（失败时打印完整输出——validate.log → validation issue → attempt=2 模型针对性修复）
     test_paths = [p for p in paths if p.startswith("tests/")]
     if test_paths or Path(repo / "tests").exists():
-        if run(["python", "-m", "pytest", "tests/", "-q"], repo).returncode != 0:
+        pt = run(["python", "-m", "pytest", "tests/", "-q"], repo)
+        if pt.returncode != 0:
+            print(f"pytest stdout:\n{(pt.stdout or '')[-3000:]}", file=sys.stderr)
+            print(f"pytest stderr:\n{(pt.stderr or '')[-2000:]}", file=sys.stderr)
             fail("pytest failed")
     checks.append("pytest")
 
