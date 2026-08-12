@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import crawl_broadnet, crawl_mobile, crawl_unicom
 from scripts.merge_data import classify, is_broadband, is_restricted, quality_flags
+from scripts.verify_pages_ui import has_explicit_traffic_text
 
 
 class TestUnicomUnitConversion:
@@ -182,6 +183,19 @@ class TestQualityFlags:
         row = {"plan_name": "无线宽带(FWA)-市区版-1年", "monthly_fee": 50,
                "general_traffic_gb": 1024, "service_content": "包含每月1T FWA无线家宽流量"}
         assert "traffic_unit_suspect" not in quality_flags(row)
+
+
+class TestVerifyTrafficEvidence:
+    def test_tb_evidence_is_explicit(self):
+        assert has_explicit_traffic_text("包含每月1T FWA无线家宽流量")
+        assert has_explicit_traffic_text("1.5TB流量")
+
+    def test_large_gb_evidence_is_explicit(self):
+        assert has_explicit_traffic_text("包含1000GB全国流量")
+
+    def test_unrelated_numbers_are_not_evidence(self):
+        assert not has_explicit_traffic_text("有效期12个月，费用600元/次")
+        assert not has_explicit_traffic_text("100GBA测试")
 
     def test_fee_outlier(self):
         row = {"plan_name": "融合套餐", "monthly_fee": 1719, "general_traffic_gb": 1000,

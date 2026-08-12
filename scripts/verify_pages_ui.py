@@ -36,6 +36,16 @@ def fetch_json(url: str, timeout: int = 30) -> dict | list:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def has_explicit_traffic_text(text: str) -> bool:
+    """显式流量单位证据：TB/T 任意数值，或大 GB/G 数值。"""
+    return bool(re.search(
+        r"(?:\d+(?:\.\d+)?\s*(?:TB|T)(?![0-9A-Za-z])|"
+        r"(?:[5-9]\d{2,}|\d{4,})\s*(?:GB|G)(?![0-9A-Za-z]))",
+        text,
+        re.IGNORECASE,
+    ))
+
+
 def check_data(report: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     try:
@@ -86,12 +96,14 @@ def check_data(report: dict[str, Any]) -> list[str]:
         errors.append(f"默认推荐有 {rule_broken} 条不满足发布规则")
 
     # implausible traffic (>512G) without explicit text support
+    # TB/T 也是合法显式单位：1T→1024GB（FWA 真实详情卡），不能按“>512 未解释”拦截。
     suspect = [
         r.get("plan_name", "")
         for r in rows
         if (r.get("general_traffic_gb") or 0) > 512
-        and not re.search(r"(?:[5-9]\d{2,}|\d{4,})\s*(?:GB|G|TB|T)\b",
-                          f"{r.get('plan_name','')} {r.get('service_content','')[:200]}")
+        and not has_explicit_traffic_text(
+            f"{r.get('plan_name','')} {r.get('service_content','')[:200]}"
+        )
     ]
     if suspect:
         errors.append(f"{len(suspect)} 条流量异常(>512G 无文本佐证): {suspect[:3]}")
