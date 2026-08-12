@@ -104,8 +104,14 @@ def opencode_generate(prompt: str, *, repo: Path, effort: str = "high", max_toke
                 continue
             out_text = (completed.stdout or "").strip()
             if out_text:
-                print(f"generator OK via provider={p['name']} model={p['model']}", file=sys.stderr)
-                return out_text
+                if "diff --git " in out_text:
+                    print(f"generator OK via provider={p['name']} model={p['model']}", file=sys.stderr)
+                    return out_text
+                # 端点返回非空但无 unified diff（NIM 免费层输出退化实测：返回分析文字/垃圾文本）：
+                # 不 break，继续切下一端点（火山 coding plan 更稳定）
+                last_err = f"provider={p['name']} no-diff-in-output"
+                print(f"generator {p['name']} returned no unified diff ({len(out_text)} chars); trying next", file=sys.stderr)
+                continue
             last_err = f"provider={p['name']} empty output"
         print(f"generator all providers failed ({last_err}); treating as empty", file=sys.stderr)
         return ""
