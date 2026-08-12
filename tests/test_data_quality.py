@@ -76,6 +76,55 @@ class TestMobilePlanType:
         assert crawl_mobile.parse_card("59元元气卡\n资费标准:\n59元/月\n方案编号:\n25JT100002\n资费类型:\n套餐\n适用地区:\n北京\n国内通用流量\n50GB\n")["plan_type"] == "套餐"
 
 
+class TestTelecomTrafficUnit:
+    """crawl_telecom 服务内容表流量单位解析（2026-08-12 审计实锤：1T 被填成 1.0GB）。"""
+
+    _CARD = (
+        "无线宽带(FWA)-市区版-1年（续费不含终端）\n"
+        "资费标准：\n73.3元/月\n"
+        "服务内容\n通用流量\t定向流量\t语音\n"
+        "{values}\n"
+    )
+
+    def test_tb_traffic_converted_to_gb(self):
+        import scripts.crawl_telecom as ct
+        out = ct.parse_card(self._CARD.format(values="1TB\t0MB\t0分钟"))
+        assert out is not None
+        assert out["general_traffic_gb"] == 1024.0, out.get("general_traffic_gb")
+
+    def test_t_unit_traffic(self):
+        import scripts.crawl_telecom as ct
+        out = ct.parse_card(self._CARD.format(values="2T\t0MB\t0分钟"))
+        assert out is not None
+        assert out["general_traffic_gb"] == 2048.0
+
+    def test_tb_orient_column(self):
+        import scripts.crawl_telecom as ct
+        out = ct.parse_card(self._CARD.format(values="10GB\t1TB\t0分钟"))
+        assert out is not None
+        assert out["general_traffic_gb"] == 10
+        assert out["orient_traffic_gb"] == 1024.0
+
+    def test_gb_untouched(self):
+        import scripts.crawl_telecom as ct
+        out = ct.parse_card(self._CARD.format(values="50GB\t0MB\t0分钟"))
+        assert out is not None
+        assert out["general_traffic_gb"] == 50
+
+    def test_decimal_tb(self):
+        import scripts.crawl_telecom as ct
+        out = ct.parse_card(self._CARD.format(values="1.5T\t0MB\t0分钟"))
+        assert out is not None
+        assert out["general_traffic_gb"] == 1536.0
+
+    def test_space_separated_values(self):
+        import scripts.crawl_telecom as ct
+        out = ct.parse_card(self._CARD.format(values="20GB 2TB 0分钟"))
+        assert out is not None
+        assert out["general_traffic_gb"] == 20
+        assert out["orient_traffic_gb"] == 2048.0
+
+
 class TestRestricted:
     def test_growth_plan_restricted(self):
         row = {"plan_name": "畅越冰激凌5G/5G-A套餐成长计划D（北京）-次月生效",
@@ -298,8 +347,52 @@ class TestBroadbandFields:
         assert out["broadband_mbps"] == 1000
 
     def test_speedup_pack_target(self):
+        # 2026-08-12 分类审计：提速包不含宽带线路本身 → is_broadband=False（旧期望 300 是误判）
         out = classify(self.base(plan_name="提速包", broadband="200M提速到300M宽带提速包（12个月）"))
-        assert out["broadband_mbps"] == 300
+        assert out["is_broadband"] is False
+        assert out["broadband_mbps"] is None
+
+    def test_speedup_pack_variants_not_broadband(self):
+        # 审计 6 条实锤：千兆提速包/提速小合约/上行提速包 均非宽带线路
+        for name, bb in [
+            ("宽带千兆提速包（非千兆FTTR）", "带宽提速至1000M"),
+            ("千兆提速小合约-120元/12个月（2024存量2年+）", "千兆提速"),
+            ("千兆宽带上行提速至100M提速包-50元/月", "上行提速至100M"),
+            ("200M提速到300M宽带提速包（12个月）", "200M提速到300M"),
+        ]:
+            out = classify(self.base(plan_name=name, broadband=bb))
+            assert out["is_broadband"] is False, name
+
+    def test_public_ip_service_not_broadband(self):
+        # 审计：公网IP 是宽带附加服务，非线路本体
+        out = classify(self.base(plan_name="固网宽带-开通公网IP服务10元/月（2024）", broadband="固网宽带"))
+        assert out["is_broadband"] is False
+
+    def test_mobile_main_card_subproduct_not_broadband(self):
+        # 审计：融合套餐的 5G 移网主卡子产品——宽带仅营销词，本身是移网卡
+        out = classify(self.base(
+            plan_name="联通智家全光臻宽带全家享99元档套餐5G移网主卡（北京）", broadband="全光臻宽带"))
+        assert out["is_broadband"] is False
+
+    def test_traffic_bolt_on_not_broadband(self):
+        # 审计：臻宽带融合套餐的流量补充月包——流量加装非线路
+        out = classify(self.base(
+            plan_name="臻宽带融合套餐166档0元20GB流量补充月包（北京）", broadband="臻宽带融合套餐"))
+        assert out["is_broadband"] is False
+
+    def test_real_broadband_with_speedup_desc_not_excluded(self):
+        # 误伤回归：真宽带含"提速"描述（FTTR 套餐 content 提速至2000M）不能被 BOLT_ON 排除
+        out = classify(self.base(plan_name="爱家福袋FTTR-WiFi7（2000M）", broadband="",
+                                 service_content="爱家光网WiFi 7一主一从方案部署，提速至2000M。合约到期2000M宽带提速自动恢复原价"))
+        assert out["is_broadband"] is True
+        assert out["broadband_mbps"] == 2000
+
+    def test_real_bundle_not_excluded_by_bolt_on_keywords(self):
+        # 误伤回归：真实融合宽带套餐（名称无"移网主卡/提速包"等子产品尾缀）
+        # 即使 broadband 字段含"提速"字样也不被排除（BOLT_ON_RE 只匹配名称）
+        out = classify(self.base(
+            plan_name="联通智家全光臻宽带全家享99元档套餐（北京）", broadband="全光臻宽带，含提速服务"))
+        assert out["is_broadband"] is True
 
     def test_qianzhao_word(self):
         out = classify(self.base(plan_name="移动看家尊享福袋千兆版", broadband="",
@@ -333,8 +426,10 @@ class TestBroadbandFields:
         assert out["access_method"] == "光纤"
 
     def test_access_fwa(self):
+        # 2026-08-12 分类审计：FWA 通用流量加装包是流量加装，非宽带线路 → 无接入方式
         out = classify(self.base(plan_name="FWA通用流量加装包", broadband="10元/次，包含FWA无线宽带200GB流量"))
-        assert out["access_method"] == "无线(FWA)"
+        assert out["is_broadband"] is False
+        assert out["access_method"] is None
         assert out["broadband_mbps"] is None
 
     def test_access_fttr_priority(self):
@@ -361,6 +456,22 @@ class TestClassify:
         }
         row.update(kw)
         return row
+
+    def test_plan_type_normalization(self):
+        # 2026-08-12 分类审计 7 条实锤：会员/场景包/功能包/公网IP/提速包 不是流量包
+        cases = [
+            ("Mini会员", "流量包", "套餐"),
+            ("奔马权益会员", "流量包", "套餐"),
+            ("5G-A场景包", "流量包", "套餐"),
+            ("5G升级功能包", "流量包", "套餐"),
+            ("云智手机服务高配版", "流量包", "套餐"),
+            ("固网宽带-开通公网IP服务10元/月（2024）", "流量包", "套餐"),
+            ("千兆宽带上行提速至100M提速包-50元/月", "流量包", "套餐"),
+            ("200G全国通用流量年包", "流量包", "流量包"),  # 真流量包保持
+        ]
+        for name, src_type, expect in cases:
+            out = classify(self.base(plan_name=name, plan_type=src_type))
+            assert out["plan_type"] == expect, f"{name}: {out['plan_type']} != {expect}"
 
     def test_default_show_ok(self):
         out = classify(self.base())

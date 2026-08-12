@@ -302,6 +302,22 @@ def quality_flags(row: dict[str, Any]) -> list[str]:
 
 BROADBAND_KEYWORDS = ["宽带", "光纤", "FTTH", "全光", "单宽", "方宽", "长宽"]
 
+# 提速/加装/子产品/附加服务不含宽带线路本体（2026-08-12 分类审计 26 条实锤）：
+# - 电信提速包/提速小合约/上行提速/提速到（千兆提速包、200M提速到300M宽带提速包）：仅速率
+# - 加装包/流量补充/补充月包（FWA通用流量加装包、臻宽带…20GB流量补充月包）：流量加装
+# - 公网IP（固网宽带-开通公网IP服务）：宽带附加服务
+# - 移网主卡（联通智家…套餐5G移网主卡）：融合套餐的子产品，本身是移网卡，宽带仅营销词
+BOLT_ON_OR_SUBPRODUCT_RE = re.compile(
+    r"提速包|提速小合约|上行提速包|加装包|公网IP|流量补充|补充月包|移网主卡"
+)
+
+# plan_type 语义（2026-08-12 分类审计 7 条实锤：Mini会员/奔马权益会员/5G-A场景包/5G升级功能包/
+# 云智手机服务/公网IP/提速包 被源站标"流量包"——会员/场景包/功能包/服务/附加件不是数据包）
+# DATA_PACK 用"流量年包"而非裸"年包"（防"宽带年包/宽带包年"等宽带年付误判为流量包）；
+# 补充月包是流量补充包（归流量包），不在 NON_DATA_PACK
+DATA_PACK_NAME_RE = re.compile(r"流量年包|流量包|加量包|加油包|日租包|补充月包|权益流量包")
+NON_DATA_PACK_NAME_RE = re.compile(r"会员|场景包|功能包|服务包|服务高配|公网IP|提速包|提速小合约")
+
 # service_content 中"宽带"字样不一定是宽带产品：营销文案常见功能描述/否定语境
 # （"亲情守护-宽带上网安全"、"不可同时办理含宽带的营销案"）。
 # content 命中规则：速率+宽带、宽带+产品词、含/加装等实体前缀；并排除否定前缀窗口。
@@ -332,6 +348,11 @@ def is_broadband(row: dict[str, Any]) -> bool:
     name = str(row.get("plan_name") or "")
     broadband = str(row.get("broadband") or "")
     content = str(row.get("service_content") or "")[:200]
+    # 提速包/加装包/公网IP/移网主卡等加装件与子产品不含宽带线路本体。
+    # 仅匹配产品名称（26 条审计实锤全部在名称命中；content/broadband 不参与，
+    # 防真实融合套餐的附加权益描述（含"提速/流量补充"字样）被误伤）。
+    if BOLT_ON_OR_SUBPRODUCT_RE.search(name):
+        return False
     if broadband and broadband not in ("无", "0", "-"):
         return True
     if any(kw in name for kw in BROADBAND_KEYWORDS):
@@ -452,6 +473,19 @@ def classify(row: dict[str, Any]) -> dict[str, Any]:
     """Return (publishable, default_show, reason)."""
     out = fix_region(row)
     out = normalize_monthly_fee(out)
+    # plan_type 语义规整（2026-08-12 分类审计 7 条实锤）：
+    # 会员/场景包/功能包/服务包/公网IP/提速包 不是"流量包"（流量包仅限真数据包）。
+    # 保护原值：仅当原 plan_type=流量包 且命中非数据包词 → 改套餐（修审计 7 条）；
+    # DATA_PACK 命中仅用于原值缺失/异常时修正，不覆盖源站已正确标"套餐"的真流量包。
+    _name = str(out.get("plan_name") or "")
+    _pt = str(out.get("plan_type") or "")
+    if _pt == "流量包" and NON_DATA_PACK_NAME_RE.search(_name):
+        out["plan_type"] = "套餐"
+    elif _pt not in ("套餐", "流量包"):
+        if DATA_PACK_NAME_RE.search(_name):
+            out["plan_type"] = "流量包"
+        elif NON_DATA_PACK_NAME_RE.search(_name):
+            out["plan_type"] = "套餐"
     out["excluded_phone_contract"] = has_strong_contract(out)
     out["restricted"] = is_restricted(out)
     out["quality_flags"] = quality_flags(out)

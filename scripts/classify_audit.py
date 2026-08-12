@@ -44,6 +44,10 @@ UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
+# 移网速率语义名称（流量条目 m_unit=rate 时豁免——5G/升级包/速率/Mbps/王卡 等）
+# "升级包/升级功能包" 精确匹配，避免裸"升级"误豁免"升级版流量包"等非速率语义
+MOBILE_RATE_NAME_RE = re.compile(r"5G|升级包|升级功能包|速率|峰值|Mbps|王卡|千兆|百兆")
+
 _PLAN_NAME_RE = re.compile(r"^\s*plan_name\s*=\s*(?P<q>['\"])(?P<name>.*?)(?P=q)\s*\|\s*broadband_field=")
 
 
@@ -631,12 +635,18 @@ def main() -> int:
                     reasons.append(f"类型判定: 数据={data_pt} AI={judged_pt}")
                 if v.get("unit_confusion"):
                     reasons.append(f"单位语义混淆: {v.get('reason', '')[:100]}")
-                # m_unit 独立一致性校验：宽带行有带宽值 → 速率语义（rate/mixed，排除 quantity/none）；
-                # 纯流量行 → 数量语义（quantity/mixed/none，排除 rate）
+                # m_unit 校验：宽带行有带宽值却判 quantity/none = 语义错位；
+                # 流量条目判 rate 仅当名称含移网速率语义（5G/升级/速率/Mbps/王卡）时豁免
+                # ——2026-08-12 实测 27 条流量包名含 5G 速率属正常，其余仍报警防真实单位错误
                 ai_mu = str(v.get("m_unit") or "")
                 if data_bb and bw_f is not None and ai_mu not in ("rate", "mixed"):
                     reasons.append(f"M单位语义可疑: 宽带套餐有带宽值但 AI 判 m_unit={ai_mu} ({v.get('reason', '')[:60]})")
-                if not data_bb and tr_f is not None and ai_mu == "rate":
+                if (
+                    not data_bb
+                    and tr_f is not None
+                    and ai_mu == "rate"
+                    and not MOBILE_RATE_NAME_RE.search(str(row.get("plan_name") or ""))
+                ):
                     reasons.append(f"M单位语义可疑: 流量条目但 AI 判 m_unit=rate ({v.get('reason', '')[:60]})")
             if reasons:
                 mismatches.append({

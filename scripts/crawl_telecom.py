@@ -121,11 +121,11 @@ def parse_card(text: str) -> dict[str, Any] | None:
                 continue
             if "：" in line or "其他" in line or "语音\t" in line or "通用流量" in line or "定向流量" in line:
                 continue
-            if re.match(r"^[\d.]+\s*(GB|MB|分钟)", line):
+            if re.match(r"^[\d.]+\s*(GB|MB|TB|T|分钟)", line):
                 cols = re.split(r"[\s\t]+", line)
                 col_idx = 0
                 for col in cols:
-                    num = re.match(r"^([\d.]+)\s*(GB|MB|分钟)", col)
+                    num = re.match(r"^([\d.]+)\s*(GB|MB|TB|T|分钟)", col)
                     if not num:
                         col_idx += 1
                         continue
@@ -143,6 +143,12 @@ def parse_card(text: str) -> dict[str, Any] | None:
                             traffic = round(value / 1024, 2)
                         else:
                             orient = round(value / 1024, 2)
+                    elif unit in ("TB", "T"):
+                        # 1T=1024GB（2026-08-12 分类审计实锤：FWA 1T 流量被填成 1.0GB）
+                        if col_idx == 0:
+                            traffic = round(value * 1024, 2)
+                        else:
+                            orient = round(value * 1024, 2)
                     col_idx += 1
                 break
 
