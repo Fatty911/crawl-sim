@@ -65,7 +65,8 @@ jobs:
           # 每个 label 下全部 issue 的 body 都写入，避免只取第一条漏报）
           : > failure.md
           WRITTEN=0
-          for LABEL in sim-pages-verify-failed sim-pages-audit-failed sim-pages-classify-audit; do
+          # 上一次 validate 失败详情优先（模型需针对性修复测试/逻辑）
+          for LABEL in sim-repair-validation-failed sim-pages-verify-failed sim-pages-audit-failed sim-pages-classify-audit; do
             BODIES=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label "$LABEL" \
               --json number,title,body --jq '.[] | "### issue #\(.number): \(.title)\n\(.body)\n"' --limit 1000 2>/dev/null || true)
             if [ -n "$BODIES" ]; then
@@ -105,6 +106,7 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
+      issues: write
     steps:
       - uses: actions/checkout@main
         with:
@@ -122,11 +124,49 @@ jobs:
       - name: Preserve trusted guard outside candidate tree
         run: cp scripts/ai_sim_repair.py "$RUNNER_TEMP/trusted-ai-sim-repair.py"
       - name: Validate patch
-        run: >-
-          python scripts/ai_sim_repair.py validate
-          --repo .
-          --patch "$RUNNER_TEMP/sim.patch"
-          --report "$RUNNER_TEMP/sim-validation.json"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python scripts/ai_sim_repair.py validate \
+            --repo . \
+            --patch "$RUNNER_TEMP/sim.patch" \
+            --report "$RUNNER_TEMP/sim-validation.json" > "$RUNNER_TEMP/validate.log" 2>&1
+          RC=$?
+          set -e
+          cat "$RUNNER_TEMP/validate.log"
+          if [ "$RC" -ne 0 ]; then
+            # 失败详情写入 issue：attempt=2 的 Prepare failure log 会读取，模型针对性修复
+            gh label create sim-repair-validation-failed --repo "$GITHUB_REPOSITORY" \
+              --color D93F0B --description "AI repair validate 失败详情（供下一 attempt 修复）" 2>/dev/null || true
+            {
+              echo "## AI repair validate 失败（run $GITHUB_RUN_ID，attempt ${{ inputs.attempt }}）"
+              echo ""
+              echo '```'
+              tail -200 "$RUNNER_TEMP/validate.log"
+              echo '```'
+              echo "完整日志见 sim-validation artifact（validate.log）"
+            } > "$RUNNER_TEMP/validation-issue-body.md"
+            # 先创建新 issue，成功后再关旧（避免创建失败时旧 issue 已消失、
+            # 下一 attempt 的 Prepare 读不到验证详情）；关旧时排除刚创建的新 issue
+            NEW_URL=$(gh issue create --repo "$GITHUB_REPOSITORY" \
+                --title "AI repair validation failed: $GITHUB_RUN_ID" \
+                --label sim-repair-validation-failed \
+                --body-file "$RUNNER_TEMP/validation-issue-body.md") || true
+            if [ -n "$NEW_URL" ]; then
+              NEW_NUM="${NEW_URL##*/}"
+              echo "validation failure issue #$NEW_NUM created"
+              for OLD in $(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label sim-repair-validation-failed \
+                  --json number --jq '.[].number' --limit 1000 2>/dev/null || true); do
+                [ "$OLD" = "$NEW_NUM" ] && continue
+                gh issue close "$OLD" --repo "$GITHUB_REPOSITORY" --comment "已被新 validation-failed issue #$NEW_NUM 取代" || true
+              done
+            else
+              # issue 创建失败不能静默：告警 + validate.log 已随 sim-validation artifact 上传兜底
+              echo "::warning::validation-failed issue 创建失败；validate.log 已上传 sim-validation artifact"
+            fi
+            exit "$RC"
+          fi
       - name: Verify exact tree
         run: >-
           python "$RUNNER_TEMP/trusted-ai-sim-repair.py" verify-tree
@@ -138,6 +178,7 @@ jobs:
           path: |
             ${{ runner.temp }}/sim.patch
             ${{ runner.temp }}/sim-validation.json
+            ${{ runner.temp }}/validate.log
           if-no-files-found: warn
           retention-days: 14
 
@@ -243,8 +284,24 @@ jobs:
           path: ${{ runner.temp }}/reviewed
       - name: Apply exact reviewed patch
         run: |
-          git apply --check --whitespace=error "$RUNNER_TEMP/validated/sim.patch"
-          git apply --whitespace=error "$RUNNER_TEMP/validated/sim.patch"
+          # --recount：模型 hunk 行号常错（validate 已重算+--recount，finalize 必须一致）；
+          # git apply 上下文匹配失败时回退 GNU patch --fuzz=3（与 validate 相同策略）
+          if ! git apply --recount --whitespace=error "$RUNNER_TEMP/validated/sim.patch"; then
+            # 回退前先清理（git apply 原子失败不留痕；保险起见 + patch 失败会留 .rej/.orig 未跟踪文件）
+            git restore --worktree . || true
+            git clean -fd || true
+            # dry-run 先行：确认可应用再实际 patch（失败即清理退出）
+            if ! patch -p1 --fuzz=3 --dry-run < "$RUNNER_TEMP/validated/sim.patch"; then
+              git restore --worktree . || true
+              git clean -fd || true
+              exit 1
+            fi
+            if ! patch -p1 --fuzz=3 < "$RUNNER_TEMP/validated/sim.patch"; then
+              git restore --worktree . || true
+              git clean -fd || true
+              exit 1
+            fi
+          fi
           git diff --check
       - name: Commit and push
         env:
@@ -297,6 +354,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$GENERATE/$VALIDATE/$REVIEW/$FINAL_VALIDATE/$FINALIZE" = "success/success/success/success/success" ]; then
+            # 修复链全成功：关闭历史 validation-failed issue（下次失败会重建）
+            for N in $(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label sim-repair-validation-failed \
+                --json number --jq '.[].number' --limit 1000 2>/dev/null || true); do
+              gh issue close "$N" --repo "$GITHUB_REPOSITORY" --comment "AI 修复链已成功，验证失败 issue 自动关闭" || true
+            done
             exit 0
           fi
           if [ "$ATTEMPT" = "1" ]; then
