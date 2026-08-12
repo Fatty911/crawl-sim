@@ -205,10 +205,12 @@ jobs:
           # 用真实 chat 调用探测（models 200 不代表 chat 可用——zenmux key 按模型授权）
           NIM_OK=false
           for i in 1 2 3; do
+            # bash -e 下 curl 超时(exit 28)会直接终止脚本：探测是容错设计，
+            # 失败必须走重试/fallback，不能炸 job。|| true 吞掉非零退出码。
             code=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" \
               https://integrate.api.nvidia.com/v1/chat/completions \
               -H "Authorization: Bearer $NVIDIA_NIM_API_KEY" -H "Content-Type: application/json" \
-              -d '{"model":"deepseek-ai/deepseek-v4-flash-0731","messages":[{"role":"user","content":"hi"}],"max_tokens":1}')
+              -d '{"model":"deepseek-ai/deepseek-v4-flash-0731","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' || true)
             echo "NIM probe attempt $i: HTTP $code"
             if [ "$code" = "200" ]; then NIM_OK=true; break; fi
             sleep 10
@@ -219,7 +221,7 @@ jobs:
               code=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" -x "$DMIT_PROXY_URL" \
                 https://zenmux.ai/api/v1/chat/completions \
                 -H "Authorization: Bearer $ZENMUX_API_KEY" -H "Content-Type: application/json" \
-                -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}],"max_tokens":1}')
+                -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' || true)
               echo "zenmux probe attempt $i: HTTP $code"
               if [ "$code" = "200" ]; then ZENMUX_OK=true; break; fi
               sleep 10
