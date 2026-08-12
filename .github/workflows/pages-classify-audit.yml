@@ -1,0 +1,227 @@
+name: Pages Classify Audit
+
+on:
+  schedule:
+    - cron: "0 22 * * *"   # 每天 22:00 UTC（北京 06:00）
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages-classify-audit.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: pages-classify-audit
+  cancel-in-progress: true
+
+jobs:
+  classify-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@main
+
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@main
+        with:
+          node-version: "22"
+
+      - name: Install deps + playwright + opencode
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install playwright==1.61.0
+          python -m playwright install chromium-headless-shell
+          npm install --global opencode-ai@latest
+
+      - name: Classify audit (AI scans every entry's category + M-unit semantics)
+        id: audit
+        continue-on-error: true
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+          ZENMUX_API_KEY: ${{ secrets.ZENMUX_API_KEY }}
+          VOLCENGINE_CODING_PLAN_API_KEY: ${{ secrets.VOLCENGINE_CODING_PLAN_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DMIT_PROXY_URL: ${{ secrets.DMIT_PROXY_URL }}
+        run: |
+          python scripts/classify_audit.py \
+            --output "$RUNNER_TEMP/classify-audit-report.json" \
+            --batch 80
+
+      - name: Summarize findings
+        id: summarize
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os
+          report_path = os.path.join(os.environ["RUNNER_TEMP"], "classify-audit-report.json")
+          if not os.path.isfile(report_path):
+              print("classify audit collection failed (no report)")
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "classify-issues.txt"), "w", encoding="utf-8") as fh:
+                  fh.write("分类审计收集失败（未生成报告），需人工查看 run 日志与 artifact。")
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              raise SystemExit(0)
+          try:
+              report = json.load(open(report_path, encoding="utf-8"))
+          except Exception as exc:
+              print(f"classify audit report unparseable: {exc}")
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "classify-issues.txt"), "w", encoding="utf-8") as fh:
+                  fh.write(f"分类审计报告损坏无法解析：{exc}\n需人工查看 artifact。")
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              raise SystemExit(0)
+          # 顶层必须是 dict（list/str 等合法 JSON 会导致 report.get 抛异常绕过 needs_attention）
+          if not isinstance(report, dict):
+              print(f"classify audit report top-level not an object: {type(report).__name__}")
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "classify-issues.txt"), "w", encoding="utf-8") as fh:
+                  fh.write(f"分类审计报告顶层结构异常（{type(report).__name__} 而非对象），需人工查看 artifact。")
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              raise SystemExit(0)
+          # schema 校验：顶层关键字段 + summary 字段存在且类型正确，否则视为报告异常（防止误判正常自动关 issue）
+          # 注意：bool 是 int 子类，用 type(x) is int 严格校验，避免布尔值被接受
+          schema_ok = (
+              isinstance(report.get("misclassifications"), list)
+              and isinstance(report.get("batch_failures"), list)
+              and type(report.get("total")) is int
+              and type(report.get("scanned")) is int
+              and report.get("scanned", 0) >= 0
+              and report.get("scanned", 0) <= report.get("total", 0)
+          )
+          s = report.get("summary")
+          dom = report.get("dom")
+          # dom 必须是 dict（list/str 会导致下面的 .get 抛异常绕过 needs_attention）
+          dom_ok = (
+              isinstance(dom, dict)
+              and type(dom.get("dom_only_count")) is int
+              and dom.get("dom_only_count", 0) >= 0
+              and isinstance(dom.get("manifest_error"), bool)
+          )
+          # dom_anomaly_count：DOM-only/manifest 异常不计入 scanned，但计入 mismatch_count
+          dom_anomaly = s.get("dom_anomaly_count") if isinstance(s, dict) else None
+          schema_ok = schema_ok and (
+              isinstance(s, dict)
+              and dom_ok
+              and type(s.get("total")) is int
+              and type(s.get("scanned")) is int
+              and type(s.get("ai_judged")) is int
+              and type(s.get("mismatch_count")) is int
+              and type(s.get("dom_anomaly_count")) is int
+              and isinstance(s.get("incomplete"), bool)
+              and type(s.get("batch_failures")) is int
+              # 计数一致性 + 范围：summary 与顶层互相印证，且数量不越界
+              and s.get("total") == report.get("total")
+              and s.get("scanned") == report.get("scanned")
+              and s.get("mismatch_count") == len(report.get("misclassifications") or [])
+              and s.get("batch_failures") == len(report.get("batch_failures") or [])
+              and dom_anomaly == (dom.get("dom_only_count", 0) + (1 if dom.get("manifest_error") else 0))
+              and 0 <= s.get("ai_judged", 0) <= s.get("scanned", 0)
+              # mismatch 可含 DOM-only/manifest 异常（不计入 scanned），上界 = scanned + dom_anomaly
+              and 0 <= s.get("mismatch_count", 0) <= s.get("scanned", 0) + (dom_anomaly or 0)
+              and 0 <= s.get("batch_failures", 0) <= s.get("total", 0)
+          )
+          if not schema_ok:
+              print(f"classify audit report schema invalid: {s!r}")
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "classify-issues.txt"), "w", encoding="utf-8") as fh:
+                  fh.write(f"分类审计报告 schema 异常（summary 字段缺失/类型错误）：{json.dumps(report, ensure_ascii=False)[:500]}\n需人工查看 artifact。")
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              raise SystemExit(0)
+          mismatches = report.get("misclassifications", [])
+          print(json.dumps(s, ensure_ascii=False))
+          if s.get("mismatch_count", 0) > 0 or s.get("batch_failures", 0) > 0 or s.get("incomplete"):
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "classify-issues.txt"), "w", encoding="utf-8") as fh:
+                  fh.write(f"分类审计发现 {s.get('mismatch_count', 0)} 条疑似分类/单位语义错误，"
+                           f"{s.get('batch_failures', 0)} 批失败，未完成={s.get('incomplete')}。\n\n")
+                  fh.write(json.dumps(report, ensure_ascii=False, indent=1))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+          else:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=false\n")
+          PY
+
+      - name: Upload classify-audit artifact
+        if: always()
+        uses: actions/upload-artifact@main
+        with:
+          name: pages-classify-audit-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/classify-audit-report.json
+            ${{ runner.temp }}/classify-issues.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Open classify-audit issue
+        if: steps.summarize.outputs.needs_attention == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          gh label create sim-pages-classify-audit --repo "$GITHUB_REPOSITORY" \
+            --color FBCA04 --description "Pages 分类/单位语义审计发现问题" 2>/dev/null || true
+          # 先创建新 issue，再循环关闭旧 issue：避免先关旧后新失败造成无 issue 窗口
+          NEW_URL=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "Pages 分类审计: ${{ github.run_id }}" \
+            --label sim-pages-classify-audit \
+            --body "$(cat "$RUNNER_TEMP/classify-issues.txt")") || { echo "::error::新建 issue 失败，保留旧 issue"; exit 1; }
+          NEW_NUM="${NEW_URL##*/}"
+          echo "created new issue #$NEW_NUM"
+          FAILED=0
+          for round in $(seq 1 20); do
+            ISSUES=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                  --label sim-pages-classify-audit --json number --jq '.[].number' --limit 100) \
+              || { echo "::error::gh issue list 失败，中止清理"; exit 1; }
+            [ -z "$ISSUES" ] && break
+            CLOSED_ANY=0
+            while IFS= read -r N; do
+              [ -z "$N" ] && continue
+              # 排除刚创建的新 issue（否则会被自己列出并关闭）
+              [ "$N" = "$NEW_NUM" ] && continue
+              CLOSED_ANY=1
+              gh issue close "$N" --repo "$GITHUB_REPOSITORY" --comment "已由最新分类审计 issue #$NEW_NUM 取代" \
+                || { echo "WARN: 关闭旧 issue #$N 失败"; FAILED=1; }
+            done <<< "$ISSUES"
+            [ "$CLOSED_ANY" = "0" ] && break
+          done
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::旧 classify-audit issue 关闭失败（新 issue 已保留）"
+            exit 1
+          fi
+
+      - name: Close classify-audit issue when OK
+        if: steps.summarize.outputs.needs_attention == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          CLOSED=0
+          FAILED=0
+          for round in $(seq 1 20); do
+            ISSUES=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                  --label sim-pages-classify-audit --json number --jq '.[].number' --limit 100) \
+              || { echo "::error::gh issue list 失败"; exit 1; }
+            [ -z "$ISSUES" ] && break
+            CLOSED_ANY=0
+            while IFS= read -r N; do
+              [ -z "$N" ] && continue
+              CLOSED_ANY=1
+              if gh issue close "$N" --repo "$GITHUB_REPOSITORY" \
+                  --comment "分类审计恢复正常，自动关闭"; then
+                CLOSED=$((CLOSED + 1))
+              else
+                echo "WARN: 关闭 issue #$N 失败"
+                FAILED=1
+              fi
+            done <<< "$ISSUES"
+            [ "$CLOSED_ANY" = "0" ] && break
+          done
+          echo "closed classify-audit issues: $CLOSED"
+          if [ "$FAILED" = "1" ]; then exit 1; fi
