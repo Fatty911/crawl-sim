@@ -175,6 +175,14 @@ Publication invariants (do NOT weaken):
   exclusive listing like 与…宽带类…互斥); extract bandwidth only from broadband field,
   plan name, or bandwidth-context content; mobile-network peak rates (5G-A 下行3Gbps,
   移动上网速率/峰值速率/网络最高) are NOT broadband bandwidth.
+- Speed-boost/bolt-on products (宽带提速包/千兆提速小合约/上行提速包/FTTR 提速包/加装包) do NOT
+  contain a broadband line themselves → is_broadband must be False even when 宽带/提速/千兆/1000M
+  appear in the name (1000M there is a rate, not a line); same for pure-traffic bolt-ons
+  (FWA 通用流量加装包: 200GB is a quantity, not a line).
+- plan_type=流量包 only for true data packs (流量包/加量包/加油包/年包/日租包/权益流量包);
+  权益会员/场景包/功能包/服务包/公网IP 等非流量包不得标 plan_type=流量包.
+- M/兆 semantics: broadband_mbps is a RATE (50~100000); general_traffic_gb/orient_traffic_gb is a
+  QUANTITY (0~10000 GB, 1T=1024GB not 1.0GB); never store a rate value in a quantity field.
 - 广电 yearly plans named "一年…XX元档" (e.g. 靓号宽带双享包48元档) use tier price / 12 as
   monthly fee; the API productPrice is unreliable for tier products.
 """

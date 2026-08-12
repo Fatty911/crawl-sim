@@ -61,22 +61,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ISSUE_BODY=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-            --label sim-pages-verify-failed --json number,title,body --jq '.[0].body // ""' 2>/dev/null || true)
-          if [ -n "$ISSUE_BODY" ]; then
-            printf 'Pages 部署后校验失败报告（来自 sim-pages-verify-failed issue）：\n%s\n' "$ISSUE_BODY" > failure.md
-            echo "failure log from pages-verify issue"
-          else
-            # AI 页面审计发现的问题（sim-pages-audit-failed issue：渲染/数据准确性/可读性）
-            AUDIT_BODY=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-              --label sim-pages-audit-failed --json number,title,body --jq '.[0].body // ""' 2>/dev/null || true)
-            if [ -n "$AUDIT_BODY" ]; then
-              printf 'Pages AI 审计发现的问题（来自 sim-pages-audit-failed issue，含渲染/数据/可读性缺陷描述）：\n%s\n' "$AUDIT_BODY" > failure.md
-              echo "failure log from pages-audit issue"
-            else
-              printf 'crawl-sim pipeline failure. Trigger: AI repair (attempt %s).\nReview the crawler/merge/workflow/files to identify and fix the fault.\n' "${{ inputs.attempt }}" > failure.md
-              echo "generic failure log"
+          # 合并读取所有审计类 open issue（verify/audit/classify 各自独立，互不互斥；
+          # 每个 label 下全部 issue 的 body 都写入，避免只取第一条漏报）
+          : > failure.md
+          WRITTEN=0
+          for LABEL in sim-pages-verify-failed sim-pages-audit-failed sim-pages-classify-audit; do
+            BODIES=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label "$LABEL" \
+              --json number,title,body --jq '.[] | "### issue #\(.number): \(.title)\n\(.body)\n"' --limit 1000 2>/dev/null || true)
+            if [ -n "$BODIES" ]; then
+              printf '## %s\n%s\n' "$LABEL" "$BODIES" >> failure.md
+              WRITTEN=1
+              echo "failure log from $LABEL issues"
             fi
+          done
+          if [ "$WRITTEN" = "0" ]; then
+            printf 'crawl-sim pipeline failure. Trigger: AI repair (attempt %s).\nReview the crawler/merge/workflow/files to identify and fix the fault.\n' "${{ inputs.attempt }}" > failure.md
+            echo "generic failure log"
           fi
       - name: Generate constrained patch
         env:
@@ -269,6 +269,13 @@ jobs:
         run: |
           gh workflow run crawl-unicom.yml --repo "$GITHUB_REPOSITORY" --ref main || true
           gh workflow run crawl-broadnet.yml --repo "$GITHUB_REPOSITORY" --ref main || true
+          # 复扫分类审计：修复生效 → 新报告 OK → 自动关闭 sim-pages-classify-audit issue
+          # dispatch 失败不静默：告警记录（修复本身已提交推送，复扫失败不回滚修复，但需人工关注）
+          if gh workflow run "Pages Classify Audit" --repo "$GITHUB_REPOSITORY" --ref main; then
+            echo "dispatched Pages Classify Audit re-scan"
+          else
+            echo "::warning::分类审计复扫 dispatch 失败，sim-pages-classify-audit issue 需人工关注"
+          fi
 
   follow-up:
     needs: [freeze_check, generate, validate, review, final_validate, finalize]
