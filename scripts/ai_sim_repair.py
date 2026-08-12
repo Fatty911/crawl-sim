@@ -44,10 +44,16 @@ ALLOWED_FILES = {
 FORBIDDEN_PATCH_HEADERS = ("diff --git a/.github/workflows/AI", "diff --git a/.git")
 DIFF_HEADER = re.compile(r"^diff --git a/(.+?) b/(.+?)$")
 
-GENERATOR_PROVIDER_NAME = "zenmux"
-GENERATOR_BASE_URL = "https://zenmux.ai/api/v1"
-GENERATOR_KEY_ENV = "ZENMUX_API_KEY"
-GENERATOR_MODEL = "deepseek-v4-flash"
+# 保证 scripts/ 在 sys.path（无论以 python scripts/ai_sim_repair.py 还是其它方式调用）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# 端点池唯一事实源：scripts/ai_providers.py（免费→单家Plan→聚合Plan→按量付费，自动切换）
+from ai_providers import PROVIDERS as _ALL_PROVIDERS
+from ai_providers import apply_proxy_env as _apply_proxy_env
+from ai_providers import available as _available_providers
+
+# 仅保留 key 已配置的端点（secrets 缺失的跳过，避免空 key 白试一轮）；全缺时兜底用完整池
+GENERATOR_PROVIDERS = _available_providers() or _ALL_PROVIDERS
 
 
 def fail(message: str) -> None:
@@ -59,54 +65,48 @@ def sha256_text(text: str) -> str:
 
 
 def opencode_generate(prompt: str, *, effort: str = "high", max_tokens: int = 20000) -> str:
-    read_only = {
-        "*": "deny", "read": "allow", "edit": "deny", "bash": "deny",
-        "webfetch": "deny", "task": "deny", "question": "deny", "external_directory": "deny",
-    }
-    config = {
-        "provider": {
-            GENERATOR_PROVIDER_NAME: {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": GENERATOR_PROVIDER_NAME,
-                "options": {"baseURL": GENERATOR_BASE_URL, "apiKey": f"{{env:{GENERATOR_KEY_ENV}}}"},
-                "models": {GENERATOR_MODEL: {"limit": {"context": 1000000, "output": max(1024, max_tokens)}}},
-            }
-        },
-        "agent": {"plan": {"permission": read_only}},
-        "permission": read_only,
-    }
-    env = dict(os.environ)
-    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, ensure_ascii=False)
-    env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
-    env["OPENCODE_DISABLE_TELEMETRY"] = "1"
+    from ai_providers import build_opencode_config
+
+    config = build_opencode_config(GENERATOR_PROVIDERS, max_tokens=max_tokens)
+    base_env = dict(os.environ)
+    base_env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, ensure_ascii=False)
+    base_env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    base_env["OPENCODE_DISABLE_TELEMETRY"] = "1"
     proxy = os.environ.get("DMIT_PROXY_URL", "").strip()
-    if proxy:
-        env["NODE_USE_ENV_PROXY"] = "1"
-        env["HTTPS_PROXY"] = proxy
-        env["HTTP_PROXY"] = proxy
     opencode_bin = os.environ.get("OPENCODE_BIN", "opencode")
     with tempfile.TemporaryDirectory(prefix="sim-gen-") as tmpdir:
         prompt_file = Path(tmpdir) / "prompt.md"
         prompt_file.write_text(prompt, encoding="utf-8")
         # 注意：message 必须在 --file 之前（yargs 会把 --file 后的位置参数当文件）；
         # --file 按进程 cwd 解析，必须传绝对路径（--dir 不影响 --file 解析）。
-        cmd = [
-            opencode_bin, "run", "--pure", "--agent", "plan",
-            "--model", f"{GENERATOR_PROVIDER_NAME}/{GENERATOR_MODEL}",
-            "--format", "default", "--dir", tmpdir,
-            "Answer the attached prompt directly. Do not call tools or modify files. Return only the requested unified diff.",
-            "--file", str(prompt_file),
-        ]
-        try:
-            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=2400, env=env)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            print(f"generator opencode failed ({type(exc).__name__}); treating as empty", file=sys.stderr)
-            return ""
-        if completed.returncode != 0:
-            tail = ((completed.stderr or "") + (completed.stdout or ""))[:400]
-            print(f"generator opencode exit {completed.returncode}: {tail}", file=sys.stderr)
-            return ""
-        return (completed.stdout or "").strip()
+        last_err = ""
+        for p in GENERATOR_PROVIDERS:
+            cmd = [
+                opencode_bin, "run", "--pure", "--agent", "plan",
+                "--model", f"{p['name']}/{p['model']}",
+                "--format", "default", "--dir", tmpdir,
+                "Answer the attached prompt directly. Do not call tools or modify files. Return only the requested unified diff.",
+                "--file", str(prompt_file),
+            ]
+            run_env = _apply_proxy_env(base_env, p, proxy)
+            try:
+                completed = subprocess.run(cmd, capture_output=True, text=True, timeout=2400, env=run_env)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                last_err = f"provider={p['name']} {type(exc).__name__}: {str(exc)[:150]}"
+                print(f"generator {p['name']} failed ({type(exc).__name__}); trying next", file=sys.stderr)
+                continue
+            if completed.returncode != 0:
+                tail = ((completed.stderr or "") + (completed.stdout or ""))[:300]
+                last_err = f"provider={p['name']} exit {completed.returncode}: {tail}"
+                print(f"generator {p['name']} exit {completed.returncode}; trying next", file=sys.stderr)
+                continue
+            out_text = (completed.stdout or "").strip()
+            if out_text:
+                print(f"generator OK via provider={p['name']} model={p['model']}", file=sys.stderr)
+                return out_text
+            last_err = f"provider={p['name']} empty output"
+        print(f"generator all providers failed ({last_err}); treating as empty", file=sys.stderr)
+        return ""
 
 
 def extract_unified_diff(response: str) -> str:
