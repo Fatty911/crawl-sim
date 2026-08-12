@@ -64,7 +64,7 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def opencode_generate(prompt: str, *, effort: str = "high", max_tokens: int = 20000) -> str:
+def opencode_generate(prompt: str, *, repo: Path, effort: str = "high", max_tokens: int = 20000) -> str:
     from ai_providers import build_opencode_config
 
     config = build_opencode_config(GENERATOR_PROVIDERS, max_tokens=max_tokens)
@@ -77,14 +77,16 @@ def opencode_generate(prompt: str, *, effort: str = "high", max_tokens: int = 20
     with tempfile.TemporaryDirectory(prefix="sim-gen-") as tmpdir:
         prompt_file = Path(tmpdir) / "prompt.md"
         prompt_file.write_text(prompt, encoding="utf-8")
-        # 注意：message 必须在 --file 之前（yargs 会把 --file 后的位置参数当文件）；
-        # --file 按进程 cwd 解析，必须传绝对路径（--dir 不影响 --file 解析）。
+        # --dir 必须是仓库根（模型需读取真实源码才能产出准确 diff；tmpdir 只有 prompt.md
+        # 会让模型拒绝伪造补丁——2026-08-12 实测定性：'无法生成可用的 unified diff：
+        # 仓库源文件不在可读范围内'）。prompt 文件仍用绝对路径 --file。
+        # 注意：message 必须在 --file 之前（yargs 会把 --file 后的位置参数当文件）。
         last_err = ""
         for p in GENERATOR_PROVIDERS:
             cmd = [
                 opencode_bin, "run", "--pure", "--agent", "plan",
                 "--model", f"{p['name']}/{p['model']}",
-                "--format", "default", "--dir", tmpdir,
+                "--format", "default", "--dir", str(repo),
                 "Answer the attached prompt directly. Do not call tools or modify files. Return only the requested unified diff.",
                 "--file", str(prompt_file),
             ]
@@ -216,7 +218,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     repo = Path(args.repo)
     failure_log = args.failure.read_text(encoding="utf-8", errors="replace")
     prompt = build_prompt(repo, failure_log, args.trigger)
-    response = opencode_generate(prompt, effort=args.effort)
+    response = opencode_generate(prompt, repo=repo, effort=args.effort)
     if not response:
         print("generate: empty response from model", file=sys.stderr)
         return 1
