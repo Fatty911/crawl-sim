@@ -178,6 +178,11 @@ class TestQualityFlags:
                "general_traffic_gb": 1000, "service_content": "含全国流量1000GB"}
         assert "traffic_unit_suspect" not in quality_flags(row)
 
+    def test_large_traffic_tb_explained_ok(self):
+        row = {"plan_name": "无线宽带(FWA)-市区版-1年", "monthly_fee": 50,
+               "general_traffic_gb": 1024, "service_content": "包含每月1T FWA无线家宽流量"}
+        assert "traffic_unit_suspect" not in quality_flags(row)
+
     def test_fee_outlier(self):
         row = {"plan_name": "融合套餐", "monthly_fee": 1719, "general_traffic_gb": 1000,
                "service_content": "含全国流量1000GB"}

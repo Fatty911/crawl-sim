@@ -287,8 +287,15 @@ def quality_flags(row: dict[str, Any]) -> list[str]:
     text = f"{name} {content}"
 
     if traffic is not None and traffic > 512:
-        # >512 GB monthly is implausible unless the text explicitly says so
-        if not re.search(r"(?:[5-9]\d{2,}|\d{4,})\s*(?:GB|G|TB|T)\b", text):
+        # >512 GB monthly is implausible unless the text explicitly says so.
+        # TB/T 也是合法显式单位：1T→1024GB（FWA 真实详情卡），不能按“>512 未解释”拦截。
+        explicit_traffic = re.search(
+            r"(?:\d+(?:\.\d+)?\s*(?:TB|T)(?![0-9A-Za-z])|"
+            r"(?:[5-9]\d{2,}|\d{4,})\s*(?:GB|G)(?![0-9A-Za-z]))",
+            text,
+            re.IGNORECASE,
+        )
+        if not explicit_traffic:
             flags.append("traffic_unit_suspect")
     if fee is not None and fee > 1000:
         # After normalize_monthly_fee, monthly_fee is the effective monthly
