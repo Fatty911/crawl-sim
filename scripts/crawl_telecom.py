@@ -152,6 +152,23 @@ def parse_card(text: str) -> dict[str, Any] | None:
                     col_idx += 1
                 break
 
+    # 详情卡常把流量写在“其他服务内容”一句话中，而不是服务表（FWA 1T/200GB 实锤）。
+    # 只在“流量”语境中提取，避免把费用/有效期里的数字当流量；显式单位覆盖表格推断值。
+    flow_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(TB|T|GB|MB)(?![0-9A-Za-z])[^，。；\n]{0,25}流量",
+        other_content,
+        re.IGNORECASE,
+    )
+    if flow_match:
+        flow_value = float(flow_match.group(1))
+        flow_unit = flow_match.group(2).upper()
+        if flow_unit in ("TB", "T"):
+            traffic = round(flow_value * 1024, 2)
+        elif flow_unit == "MB":
+            traffic = round(flow_value / 1024, 2)
+        else:
+            traffic = round(flow_value, 2)
+
     if not name:
         return None
     service_content = other_content

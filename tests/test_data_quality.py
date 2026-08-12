@@ -111,6 +111,28 @@ class TestTelecomTrafficUnit:
         assert out is not None
         assert out["general_traffic_gb"] == 50
 
+    def test_other_content_tb_without_service_table(self):
+        import scripts.crawl_telecom as ct
+        text = (
+            "无线宽带(FWA)-市区版-1年（续费不含终端）\n"
+            "资费标准：\n600元/次\n"
+            "其他服务内容：600元/次，包含每月1T FWA无线家宽流量。\n"
+        )
+        out = ct.parse_card(text)
+        assert out is not None
+        assert out["general_traffic_gb"] == 1024.0
+
+    def test_other_content_gb_without_service_table(self):
+        import scripts.crawl_telecom as ct
+        text = (
+            "FWA通用流量加装包-200G流量-1个月\n"
+            "资费标准：\n10元/次\n"
+            "其他服务内容：10元/次，包含FWA无线宽带200GB流量。\n"
+        )
+        out = ct.parse_card(text)
+        assert out is not None
+        assert out["general_traffic_gb"] == 200.0
+
     def test_decimal_tb(self):
         import scripts.crawl_telecom as ct
         out = ct.parse_card(self._CARD.format(values="1.5T\t0MB\t0分钟"))
