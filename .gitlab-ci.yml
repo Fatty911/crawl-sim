@@ -1,0 +1,13 @@
+# GitLab Pages 部署 — 爬虫筛选中心
+pages:
+  stage: deploy
+  script:
+    - echo "Deploying pages from docs/"
+  artifacts:
+    paths:
+      - docs
+  publish: docs
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - docs/**/*
