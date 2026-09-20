@@ -100,6 +100,96 @@ main:
             echo "审查结果: $VERDICT"
             [ "$VERDICT" = "PASS" ] && echo "✅ 修复通过" || { echo "❌ 修复未通过"; exit 1; }
 
+  "crontab: 0 4 7,22 * *":
+    # 半月增量爬取（每月 7/22 日 04:00 Asia/Shanghai，四运营商源错峰）
+    # 增量闭环：爬取产物 data/ 与发布物 docs/ 随每轮提交回本仓，下轮基于上轮基线校验不缩小
+    # 代理：PROXY_SUBSCRIPTIONS 走 CNB 仓库环境变量，缺失即失败，禁止直连裸爬
+    - runner:
+        cpus: 2
+      docker:
+        image: python:3.12
+      env:
+        PROXY_SUBSCRIPTIONS: ${PROXY_SUBSCRIPTIONS}
+        EDGEONE_API_TOKEN: ${EDGEONE_API_TOKEN}
+      stages:
+        - name: 检查代理配置
+          script: |
+            if [ -z "$PROXY_SUBSCRIPTIONS" ]; then
+              echo "❌ 未配置 PROXY_SUBSCRIPTIONS：请到 CNB 仓库设置-环境变量配置。防反爬必须走 Mihomo 代理。"
+              exit 1
+            fi
+        - name: install-deps
+          script: |
+            python -m pip install -r requirements.txt
+            python -m playwright install chromium-headless-shell || echo "playwright 安装失败，需浏览器的源将跳过"
+        - name: 启动Mihomo代理
+          script: |
+            set -e
+            python scripts/setup_proxy_runtime.py --require-proxy --test-url https://m.10099.com.cn/costNotice/
+            printf 'export HTTP_PROXY=http://127.0.0.1:7890\nexport HTTPS_PROXY=http://127.0.0.1:7890\nexport http_proxy=http://127.0.0.1:7890\nexport https_proxy=http://127.0.0.1:7890\n' > /tmp/proxy.env
+        - name: 爬取-广电
+          script: |
+            . /tmp/proxy.env
+            python scripts/crawl_broadnet.py --output data/broadnet.json --min-records 50 \
+              || echo "广电 单源失败，继续其它源"
+        - name: 爬取-移动
+          script: |
+            . /tmp/proxy.env
+            python scripts/crawl_mobile.py --output data/mobile.json --min-records 60 \
+              || echo "移动 单源失败，继续其它源"
+        - name: 爬取-电信
+          script: |
+            . /tmp/proxy.env
+            python scripts/crawl_telecom.py --output data/telecom.json --min-records 80 \
+              || echo "电信 单源失败，继续其它源"
+        - name: 爬取-联通
+          script: |
+            . /tmp/proxy.env
+            python scripts/crawl_unicom.py --output data/unicom.json --min-records 100 \
+              || echo "联通 单源失败，继续其它源"
+        - name: 清理代理环境
+          script: python scripts/setup_proxy_runtime.py --clear
+        - name: 合并-校验-保留基线
+          script: |
+            set -e
+            mkdir -p dist docs/data
+            [ -f docs/data/latest.json ] || echo '[]' > docs/data/latest.json
+            python scripts/merge_data.py --data-dir data --output dist/merged.json
+            python - <<'PY'
+            import json
+            rows = json.load(open('dist/merged.json', encoding='utf-8'))
+            shown = [r for r in rows if r.get('default_show')]
+            assert len(rows) >= 20, f"merged too small: {len(rows)}"
+            assert len(shown) >= 5, f"default shown too small: {len(shown)}"
+            PY
+            python scripts/verify_publish_superset.py \
+              --baseline docs/data/latest.json \
+              --candidate dist/merged.json
+            python scripts/prepare_pages_payload.py \
+              --input dist/merged.json \
+              --docs-dir docs
+            cp dist/merged.json docs/data/latest.json
+        - name: 回推增量状态
+          script: |
+            set -e
+            git config user.email "xuerui911@gmail.com"
+            git config user.name "Fatty911"
+            for d in data dist docs; do [ -d "$d" ] && git add "$d"; done
+            if git diff --cached --quiet; then
+              echo "无增量变更"
+            else
+              git commit -m "chore: 半月增量爬取+发布 [skip ci]"
+              git push "https://${CNB_TOKEN_USER_NAME:-cnb}:${CNB_TOKEN}@cnb.cool/xuerui911-mirror/crawl-sim.git" HEAD:main
+            fi
+        - name: 发布到EdgeOne Pages
+          image: node:22
+          script: |
+            if [ -z "$EDGEONE_API_TOKEN" ]; then
+              echo "❌ 未配置 EDGEONE_API_TOKEN：请到 CNB 仓库设置-环境变量配置（令牌在 EdgeOne Makers 控制台创建）。"
+              exit 1
+            fi
+            npx -y edgeone@latest makers deploy docs -n crawl-sim -t "$EDGEONE_API_TOKEN" --json
+
   "crontab: 0 8,20 * * *":
     - docker:
         image: python:3.11
