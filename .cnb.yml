@@ -4,6 +4,9 @@
 
 main:
   push:
+    - imports:
+        # 密钥来自 crawl-secrets 私仓（PROXY_SUBSCRIPTIONS/CLOUDFLARE_API_TOKEN/CODEBERG_TOKEN）
+        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
     - docker:
         image: python:3.11
       env:
@@ -24,6 +27,27 @@ main:
         - name: 语法校验
           script: |
             python -m py_compile scripts/*.py 2>/dev/null && echo "SYNTAX=PASS" >> _stage_context_.env || echo "SYNTAX=FAIL" >> _stage_context_.env
+        - name: 治理校验
+          script: |
+            # 对齐 GitHub ci.yml:33 与 ci.yml:43-67（validate_syntax + merge classify 冒烟）
+            python scripts/validate_syntax.py .github/workflows/*.yml
+            python - <<'PY'
+            import sys
+            sys.path.insert(0, '.')
+            from scripts.merge_data import classify
+            sample = {
+                "source": "中国联通", "plan_name": "测试套餐", "report_no": "T1",
+                "region": "全国", "plan_type": "套餐",
+                "monthly_fee": 59, "general_traffic_gb": 30,
+                "orient_traffic_gb": 0, "voice_minutes": 100, "sms": 0,
+                "contract": False, "service_content": "", "contract_desc": ""
+            }
+            assert classify(sample)["default_show"] is True
+            sample2 = dict(sample, plan_name="送手机合约", monthly_fee=129, contract=True)
+            out2 = classify(sample2)
+            assert out2["default_show"] is False and out2["excluded_phone_contract"] is True
+            print("merge classify OK")
+            PY
       failStages:
         - name: 诊断-收集失败上下文
           script: |
@@ -38,7 +62,7 @@ main:
               echo "| 构建日志 | $CNB_BUILD_WEB_URL |"
               echo ""
               echo "## 测试输出（最后50行）"
-              echo '```'"
+              echo '```'
               tail -50 _test_result_.txt 2>/dev/null || echo "(无)"
               echo '```'
               echo ""
@@ -102,20 +126,20 @@ main:
 
   "crontab: 0 4 7,22 * *":
     # 半月增量爬取（每月 7/22 日 04:00 Asia/Shanghai，四运营商源错峰）
-    # 增量闭环：爬取产物 data/ 与发布物 docs/ 随每轮提交回本仓，下轮基于上轮基线校验不缩小
+    # 增量闭环：发布基线取线上站点当前数据（data/、dist/、docs/data 均被 .gitignore:2-4 忽略，发布物不入仓），发布前校验不缩小
     # 代理：PROXY_SUBSCRIPTIONS 走 CNB 仓库环境变量，缺失即失败，禁止直连裸爬
+    - imports:
+        # 密钥来自 crawl-secrets 私仓（PROXY_SUBSCRIPTIONS/CLOUDFLARE_API_TOKEN/CODEBERG_TOKEN）
+        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
     - runner:
         cpus: 2
       docker:
         image: python:3.12
-      env:
-        PROXY_SUBSCRIPTIONS: ${PROXY_SUBSCRIPTIONS}
-        EDGEONE_API_TOKEN: ${EDGEONE_API_TOKEN}
       stages:
         - name: 检查代理配置
           script: |
             if [ -z "$PROXY_SUBSCRIPTIONS" ]; then
-              echo "❌ 未配置 PROXY_SUBSCRIPTIONS：请到 CNB 仓库设置-环境变量配置。防反爬必须走 Mihomo 代理。"
+              echo "❌ 未注入 PROXY_SUBSCRIPTIONS：本流水线经 imports 引用 xuerui911-mirror/crawl-secrets env.yml，请检查该私仓。防反爬必须走 Mihomo 代理。"
               exit 1
             fi
         - name: install-deps
@@ -125,26 +149,57 @@ main:
         - name: 启动Mihomo代理
           script: |
             set -e
-            python scripts/setup_proxy_runtime.py --require-proxy --test-url https://m.10099.com.cn/costNotice/
-            printf 'export HTTP_PROXY=http://127.0.0.1:7890\nexport HTTPS_PROXY=http://127.0.0.1:7890\nexport http_proxy=http://127.0.0.1:7890\nexport https_proxy=http://127.0.0.1:7890\n' > /tmp/proxy.env
+            # 本仓 setup_proxy_runtime.py 成功/降级都只写 $GITHUB_ENV（append_github_env:88-90 空路径直接跳过），CNB 无该变量
+            # → 必须 --github-env 显式导出 + sed 转 export + source，并硬校验 PROXY_ENABLED，禁止降级直连裸爬
+            : > /tmp/proxy.env
+            python scripts/setup_proxy_runtime.py --github-env /tmp/proxy.env --require-proxy --test-url https://m.10099.com.cn/costNotice/
+            sed 's/^\([A-Za-z_][A-Za-z0-9_]*\)=/export \1=/' /tmp/proxy.env > /tmp/proxy.sh
+            . /tmp/proxy.sh
+            if [ "${PROXY_ENABLED:-false}" != "true" ]; then
+              echo "❌ 代理未启用（PROXY_ENABLED!=true），防反爬要求禁止直连裸爬，终止本轮"
+              exit 1
+            fi
+            echo "代理就绪：$HTTP_PROXY"
+        - name: 获取线上发布基线
+          script: |
+            set -e
+            mkdir -p /tmp/cnb-baseline
+            # 仓内 docs/data/latest.json 被 .gitignore:2(data/) 忽略、从不入仓（deploy-pages.yml 只发布 site/ 不落仓），
+            # '[]' 空基线会让 superset 校验假绿并把线上行数塌到本轮爬取量 → 以 CNB 实际发布站当前数据为基线，拉不到即硬失败
+            for URL in \
+              "https://crawl-sim.pages.dev/data/filtered.json" \
+              "https://sim.jiucai.eu.org/data/filtered.json"; do
+              if curl --fail --show-error --silent --location --retry 3 --retry-all-errors \
+                   --connect-timeout 20 --max-time 300 "$URL" \
+                   -o /tmp/cnb-baseline/baseline.json; then
+                ROWS=$(python -c "import json;d=json.load(open('/tmp/cnb-baseline/baseline.json',encoding='utf-8'));assert isinstance(d,list);print(len(d))" 2>/dev/null || echo 0)
+                if [ "${ROWS:-0}" -ge 20 ]; then
+                  echo "BASELINE=$URL rows=$ROWS"
+                  exit 0
+                fi
+                echo "⚠️ $URL 基线行数异常（$ROWS），尝试下一个来源"
+              fi
+            done
+            echo "❌ 所有基线来源均不可用，禁止本轮发布（绝不退化为空基线）"
+            exit 1
         - name: 爬取-广电
           script: |
-            . /tmp/proxy.env
+            . /tmp/proxy.sh
             python scripts/crawl_broadnet.py --output data/broadnet.json --min-records 50 \
               || echo "广电 单源失败，继续其它源"
         - name: 爬取-移动
           script: |
-            . /tmp/proxy.env
+            . /tmp/proxy.sh
             python scripts/crawl_mobile.py --output data/mobile.json --min-records 60 \
               || echo "移动 单源失败，继续其它源"
         - name: 爬取-电信
           script: |
-            . /tmp/proxy.env
+            . /tmp/proxy.sh
             python scripts/crawl_telecom.py --output data/telecom.json --min-records 80 \
               || echo "电信 单源失败，继续其它源"
         - name: 爬取-联通
           script: |
-            . /tmp/proxy.env
+            . /tmp/proxy.sh
             python scripts/crawl_unicom.py --output data/unicom.json --min-records 100 \
               || echo "联通 单源失败，继续其它源"
         - name: 清理代理环境
@@ -152,8 +207,7 @@ main:
         - name: 合并-校验-保留基线
           script: |
             set -e
-            mkdir -p dist docs/data
-            [ -f docs/data/latest.json ] || echo '[]' > docs/data/latest.json
+            mkdir -p dist
             python scripts/merge_data.py --data-dir data --output dist/merged.json
             python - <<'PY'
             import json
@@ -162,35 +216,112 @@ main:
             assert len(rows) >= 20, f"merged too small: {len(rows)}"
             assert len(shown) >= 5, f"default shown too small: {len(shown)}"
             PY
-            python scripts/verify_publish_superset.py \
-              --baseline docs/data/latest.json \
-              --candidate dist/merged.json
-            python scripts/prepare_pages_payload.py \
-              --input dist/merged.json \
-              --docs-dir docs
-            cp dist/merged.json docs/data/latest.json
-        - name: 回推增量状态
-          script: |
-            set -e
-            git config user.email "xuerui911@gmail.com"
-            git config user.name "Fatty911"
-            for d in data dist docs; do [ -d "$d" ] && git add "$d"; done
-            if git diff --cached --quiet; then
-              echo "无增量变更"
-            else
-              git commit -m "chore: 半月增量爬取+发布 [skip ci]"
-              git push "https://${CNB_TOKEN_USER_NAME:-cnb}:${CNB_TOKEN}@cnb.cool/xuerui911-mirror/crawl-sim.git" HEAD:main
-            fi
-        - name: 发布到EdgeOne Pages
+            # 本仓 merge_data.py 未定义 build_identity_key/atomic_sources 等符号，
+            # scripts/verify_publish_superset.py 与 prepare_pages_payload.py 导入即 ImportError（GitHub 原链路同样从未调用它们），
+            # 故按 merge_data.dedupe 的身份键（source, report_no/plan_name）内联实现"基线不缩小"校验
+            python - <<'PY'
+            import json
+            def key(r):
+                return (str(r.get('source') or ''), str(r.get('report_no') or r.get('plan_name') or ''))
+            rows = json.load(open('dist/merged.json', encoding='utf-8'))
+            base = json.load(open('/tmp/cnb-baseline/baseline.json', encoding='utf-8'))
+            cand = {key(r) for r in rows}
+            base_shown = {key(r) for r in base if r.get('default_show')}
+            missing = base_shown - cand
+            if missing:
+                raise SystemExit(f"❌ publish shrink: 基线在展计划缺失 {len(missing)} 条，例: {sorted(base_shown - cand)[:3]}")
+            print(f"superset verified: 基线在展 {len(base_shown)} 条全部保留")
+            # 对齐 GitHub merge-and-filter.yml:111-118：latest=在展子集，filtered=全量（app.js:259 需要 data/filtered.json）
+            shown = [r for r in rows if r.get('default_show')]
+            json.dump(shown, open('dist/latest.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+            json.dump(rows, open('dist/filtered.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+            PY
+            # 对齐 GitHub deploy-pages.yml:50-88：site/ = docs 前端 + config + 数据 + manifest，每次重建、不入仓
+            rm -rf site
+            mkdir -p site/data site/config
+            cp -R docs/. site/
+            cp config/filter_conditions.json site/config/filter_conditions.json
+            cp dist/latest.json site/data/latest.json
+            cp dist/filtered.json site/data/filtered.json
+            python - <<'PY'
+            import json
+            from datetime import datetime, timezone
+            rows = json.load(open('site/data/latest.json', encoding='utf-8'))
+            manifest = {
+                "date": datetime.now(timezone.utc).strftime("%Y%m%d"),
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+                "rowCount": len(rows),
+                "shownCount": len(rows),
+                "sources": sorted({r.get('source') for r in rows}),
+                "files": {"latestJson": "data/latest.json", "filteredJson": "data/filtered.json"},
+            }
+            with open('site/data/manifest.json', 'w', encoding='utf-8') as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+            print(f"staged {len(rows)} shown rows into site/")
+            PY
+            touch site/.nojekyll
+        - name: 发布到Cloudflare Pages
           image: node:22
           script: |
-            if [ -z "$EDGEONE_API_TOKEN" ]; then
-              echo "❌ 未配置 EDGEONE_API_TOKEN：请到 CNB 仓库设置-环境变量配置（令牌在 EdgeOne Makers 控制台创建）。"
+            set -e
+            if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+              echo "❌ 未注入 CLOUDFLARE_API_TOKEN：本流水线经 imports 引用 xuerui911-mirror/crawl-secrets env.yml，请检查该私仓。"
               exit 1
             fi
-            npx -y edgeone@latest makers deploy docs -n crawl-sim -t "$EDGEONE_API_TOKEN" --json
+            npx -y wrangler@latest pages deploy site --project-name crawl-sim --commit-dirty=true
+        - name: 发布到Codeberg Pages
+          script: |
+            if [ -z "$CODEBERG_TOKEN" ]; then
+              echo "❌ 未注入 CODEBERG_TOKEN：本流水线经 imports 引用 xuerui911-mirror/crawl-secrets env.yml，请检查该私仓。"
+              exit 1
+            fi
+            set -e
+            W=$(mktemp -d)
+            cp -r site/. "$W/"
+            printf '%s\n' 'sim3.jiucai.eu.org' > "$W/.domains"
+            cd "$W"
+            git init -q -b pages
+            git config user.email "xuerui911@gmail.com"
+            git config user.name "Fatty911"
+            git add -A
+            git commit -qm "pages: crawl publish $(date +%Y%m%d%H%M%S)"
+            git push -q --force "https://xuerui911:${CODEBERG_TOKEN}@codeberg.org/xuerui911/crawl-sim.git" pages:pages
+            rm -rf "$W"
+        - name: 线上验收
+          script: |
+            set -e
+            # 对齐 GitHub deploy-pages verify 能力；verify_pages_ui.py:27 BASE 硬编码 sim.jiucai.eu.org（GitHub Pages 域），
+            # 无法指向 CNB 发布域，故按 deploy-pages.yml:76-108 的 manifest 回读等值比较验收实际发布目标（CF 硬、Codeberg 软）
+            python - <<'PY'
+            import json, time, urllib.request
+            with open('site/data/manifest.json', encoding='utf-8') as f:
+                expected = json.load(f)
+            def poll(url, attempts, hard):
+                error = "not attempted"
+                for attempt in range(attempts):
+                    try:
+                        req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "User-Agent": "pages-readback"})
+                        with urllib.request.urlopen(req, timeout=30) as r:
+                            actual = json.load(r)
+                        if actual == expected:
+                            print(f"线上验收通过: {url} rowCount={actual.get('rowCount')}")
+                            return None
+                        error = "deployed manifest != staged"
+                    except Exception as exc:
+                        error = repr(exc)[:200]
+                    time.sleep(15)
+                if hard:
+                    raise SystemExit(f"❌ {url} 验收失败: {error}")
+                print(f"⚠️ {url} 暂未就绪（Codeberg 自定义域待 DNS 生效后自动可见）: {error}")
+                return error
+            poll("https://crawl-sim.pages.dev/data/manifest.json", 12, True)
+            poll("https://sim3.jiucai.eu.org/data/manifest.json", 2, False)
+            PY
 
   "crontab: 0 8,20 * * *":
+    - imports:
+        # 密钥来自 crawl-secrets 私仓（PROXY_SUBSCRIPTIONS/CLOUDFLARE_API_TOKEN/CODEBERG_TOKEN）
+        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
     - docker:
         image: python:3.11
       stages:
