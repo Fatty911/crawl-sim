@@ -4,13 +4,12 @@
 
 main:
   push:
-    - imports:
-        # 密钥来自 crawl-secrets 私仓（PROXY_SUBSCRIPTIONS/CLOUDFLARE_API_TOKEN/CODEBERG_TOKEN）
-        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
     - docker:
         image: python:3.11
       env:
         GITLAB_TOKEN: ${GITLAB_TOKEN}
+      imports:
+        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
       stages:
         - name: install-deps
           script: pip install -r requirements.txt 2>/dev/null || true
@@ -128,13 +127,12 @@ main:
     # 半月增量爬取（每月 7/22 日 04:00 Asia/Shanghai，四运营商源错峰）
     # 增量闭环：发布基线取线上站点当前数据（data/、dist/、docs/data 均被 .gitignore:2-4 忽略，发布物不入仓），发布前校验不缩小
     # 代理：PROXY_SUBSCRIPTIONS 走 CNB 仓库环境变量，缺失即失败，禁止直连裸爬
-    - imports:
-        # 密钥来自 crawl-secrets 私仓（PROXY_SUBSCRIPTIONS/CLOUDFLARE_API_TOKEN/CODEBERG_TOKEN）
-        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
     - runner:
         cpus: 2
       docker:
         image: python:3.12
+      imports:
+        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
       stages:
         - name: 检查代理配置
           script: |
@@ -319,11 +317,10 @@ main:
             PY
 
   "crontab: 0 8,20 * * *":
-    - imports:
-        # 密钥来自 crawl-secrets 私仓（PROXY_SUBSCRIPTIONS/CLOUDFLARE_API_TOKEN/CODEBERG_TOKEN）
-        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
     - docker:
         image: python:3.11
+      imports:
+        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
       stages:
         - name: install-deps
           script: pip install -r requirements.txt 2>/dev/null || true
