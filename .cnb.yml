@@ -15,17 +15,38 @@ main:
           script: pip install -r requirements.txt 2>/dev/null || true
         - name: 推送代码到GitLab
           script: |
-            git remote remove gitlab 2>/dev/null || true
-            git remote add gitlab https://oauth2:${GITLAB_TOKEN}@gitlab.com/xuerui911/crawl-sim.git
-            git push gitlab main --force-with-lease 2>/dev/null || git push gitlab main
-            echo "GITLAB_PUSH=done" >> _stage_context_.env
+            if [ -z "$GITLAB_TOKEN" ]; then
+              echo "未配置 GITLAB_TOKEN：跳过 GitLab 镜像同步（多端镜像按仓配置，非必需）"
+            else
+              printf '#!/bin/sh\ncase "$1" in *sername*) echo oauth2;; *) printf "%%s" "$GITLAB_TOKEN";; esac\n' > /tmp/gl-askpass.sh
+              chmod +x /tmp/gl-askpass.sh
+              git remote remove gitlab 2>/dev/null || true
+              git remote add gitlab https://gitlab.com/xuerui911/crawl-sim.git
+              if GIT_ASKPASS=/tmp/gl-askpass.sh git push gitlab main --force-with-lease 2>&1 \
+                || GIT_ASKPASS=/tmp/gl-askpass.sh git push gitlab main 2>&1; then
+                echo "GITLAB_PUSH=done" >> _stage_context_.env
+              else
+                echo "⚠️ GitLab 镜像推送失败（不阻断主流水线；令牌无效或过期请在 GitLab 重新签发）"
+                echo "GITLAB_PUSH=failed" >> _stage_context_.env
+              fi
+              rm -f /tmp/gl-askpass.sh
+            fi
         - name: pytest
           script: |
             python -m pytest tests/ -x --tb=short 2>&1 | tee _test_result_.txt
-            echo "PYTEST_EXIT=$?" >> _stage_context_.env
+            rc=${PIPESTATUS[0]}
+            echo "PYTEST_EXIT=$rc" >> _stage_context_.env
+            # 此前退出码取 tee 的 0，测试失败从不使流水线变红（结构性假绿），现诚实穿透
+            exit "$rc"
         - name: 语法校验
           script: |
-            python -m py_compile scripts/*.py 2>/dev/null && echo "SYNTAX=PASS" >> _stage_context_.env || echo "SYNTAX=FAIL" >> _stage_context_.env
+            if python -m py_compile scripts/*.py; then
+              echo "SYNTAX=PASS" >> _stage_context_.env
+            else
+              echo "SYNTAX=FAIL" >> _stage_context_.env
+              echo "❌ SYNTAX 未通过：原写法 A && echo PASS || echo FAIL 的退出码恒为 0，属结构性假绿，现改为硬失败"
+              exit 1
+            fi
         - name: 治理校验
           script: |
             # 对齐 GitHub ci.yml:33 与 ci.yml:43-67（validate_syntax + merge classify 冒烟）
@@ -103,7 +124,9 @@ main:
         - name: 验证-pytest
           script: |
             python -m pytest tests/ -x --tb=short 2>&1 | tee _test_after_fix_.txt
-            if [ $? -eq 0 ]; then echo "PYTEST_VALIDATE=PASS" >> _fix_report_.md; else echo "PYTEST_VALIDATE=FAIL" >> _fix_report_.md; fi
+            rc=${PIPESTATUS[0]}
+            if [ "$rc" -eq 0 ]; then echo "PYTEST_VALIDATE=PASS" >> _fix_report_.md; else echo "PYTEST_VALIDATE=FAIL" >> _fix_report_.md; fi
+            echo "PYTEST_EXIT_AFTER=$rc" >> _stage_context_.env
         - name: 审查-NPC代码审查
           type: npc:go
           options:
@@ -119,6 +142,17 @@ main:
               审查修复结果，输出到 _review_result_.md。
         - name: 最终判定
           script: |
+            # 反篡改闸：自修复不得改动断言或流水线配置（为变绿改测试属禁止项，改为机器强制）
+            if ! git diff --quiet -- tests .cnb.yml 2>/dev/null; then
+              echo "X 自修复改动了 tests/ 或 .cnb.yml，判定为篡改门禁，硬失败"
+              git diff --stat -- tests .cnb.yml || true
+              exit 1
+            fi
+            AFTERRC=$(grep -o 'PYTEST_EXIT_AFTER=[0-9]*' _stage_context_.env 2>/dev/null | tail -1)
+            if [ "${AFTERRC#PYTEST_EXIT_AFTER=}" != "0" ]; then
+              echo "X 修复后 pytest 仍非零退出（$AFTERRC），修复未真正通过"
+              exit 1
+            fi
             VERDICT=$(head -1 _review_result_.md 2>/dev/null | grep -o 'PASS\|FAIL' || echo "UNKNOWN")
             echo "审查结果: $VERDICT"
             [ "$VERDICT" = "PASS" ] && echo "✅ 修复通过" || { echo "❌ 修复未通过"; exit 1; }
@@ -133,6 +167,7 @@ main:
         image: python:3.12
       imports:
         - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
+      timeout: 2h  # CNB Job 无输出默认 10min 即强杀（实测联通源被砍），显式放宽
       stages:
         - name: 检查代理配置
           script: |
@@ -143,7 +178,10 @@ main:
         - name: install-deps
           script: |
             python -m pip install -r requirements.txt
-            python -m playwright install chromium-headless-shell || echo "playwright 安装失败，需浏览器的源将跳过"
+            # 原件 crawl-mobile.yml 显式安装 playwright（requirements.txt 未声明）；
+            # 静默 || echo 会让 mobile/telecom/unicom 三个浏览器源全部 ModuleNotFoundError 却仍报绿
+            python -m pip install playwright==1.61.0
+            python -m playwright install --with-deps chromium-headless-shell
         - name: 启动Mihomo代理
           script: |
             set -e
@@ -283,7 +321,10 @@ main:
             git config user.name "Fatty911"
             git add -A
             git commit -qm "pages: crawl publish $(date +%Y%m%d%H%M%S)"
-            git push -q --force "https://xuerui911:${CODEBERG_TOKEN}@codeberg.org/xuerui911/crawl-sim.git" pages:pages
+            printf '#!/bin/sh\ncase "$1" in *sername*) echo xuerui911;; *) printf "%%s" "$CODEBERG_TOKEN";; esac\n' > /tmp/cb-askpass.sh
+            chmod +x /tmp/cb-askpass.sh
+            GIT_ASKPASS=/tmp/cb-askpass.sh git push -q --force "https://codeberg.org/xuerui911/crawl-sim.git" pages:pages
+            rm -f /tmp/cb-askpass.sh
             rm -rf "$W"
         - name: 线上验收
           script: |
@@ -312,37 +353,10 @@ main:
                     raise SystemExit(f"❌ {url} 验收失败: {error}")
                 print(f"⚠️ {url} 暂未就绪（Codeberg 自定义域待 DNS 生效后自动可见）: {error}")
                 return error
-            poll("https://crawl-sim.pages.dev/data/manifest.json", 12, True)
+            poll("https://sim2.jiucai.eu.org/data/manifest.json", 12, True)
+            poll("https://crawl-sim.pages.dev/data/manifest.json", 3, False)
             poll("https://sim3.jiucai.eu.org/data/manifest.json", 2, False)
             PY
-
-  "crontab: 0 8,20 * * *":
-    - docker:
-        image: python:3.11
-      imports:
-        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
-      stages:
-        - name: install-deps
-          script: pip install -r requirements.txt 2>/dev/null || true
-        - name: health-check
-          script: |
-            python -m scripts.health_check > _health_report_.json 2>&1
-            cat _health_report_.json
-        - name: 判断是否需要修复
-          script: |
-            python3 -c "import json; d=json.load(open('_health_report_.json')); exit(0 if d.get('issues') else 1)" 2>/dev/null || exit 0
-        - name: AI-诊断并修复
-          type: npc:go
-          options:
-            model: deepseek-v4-flash
-            thinkingLevel: max
-            maxTurns: 50
-            contextWindow: 256k
-            systemPrompt: |
-              你是资费数据质量修复 Agent。读取 _health_report_.json。
-              检查：月租折算正确性、宽带视图完整性、发布过滤（>200排除）、三视图数据一致性。
-              追溯数据流修复，运行 pytest 验证。
-            userPrompt: 分析健康检查报告并修复。
 
   pull_request:
     - stages:
