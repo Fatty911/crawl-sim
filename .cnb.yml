@@ -334,8 +334,18 @@ main:
             git commit -qm "pages: crawl publish $(date +%Y%m%d%H%M%S)"
             printf '#!/bin/sh\ncase "$1" in *sername*) echo xuerui911;; *) printf "%%s" "$CODEBERG_TOKEN";; esac\n' > /tmp/cb-askpass.sh
             chmod +x /tmp/cb-askpass.sh
-            GIT_ASKPASS=/tmp/cb-askpass.sh git push -q --force "https://codeberg.org/xuerui911/crawl-sim.git" pages:pages
+            # Codeberg 推送实测间歇瞬断（09-30 sn=cnb-55d 1.7s 秒挂一次；vps 同日三连重试版多次成功），
+            # set -e 下单次失败会砍掉后面的线上验收——与 vps 同款三次重试，仍失败保持硬失败不掩盖镜像缺口
+            OK=0
+            for i in 1 2 3; do
+              if GIT_ASKPASS=/tmp/cb-askpass.sh git push -q --force "https://codeberg.org/xuerui911/crawl-sim.git" pages:pages; then
+                OK=1; break
+              fi
+              echo "Codeberg 推送第 $i 次失败，10 秒后重试"
+              sleep 10
+            done
             rm -f /tmp/cb-askpass.sh
+            [ "$OK" = 1 ] || { echo "❌ Codeberg 连续三次推送失败"; exit 1; }
             rm -rf "$W"
         - name: 线上验收
           script: |
