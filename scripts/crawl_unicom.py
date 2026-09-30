@@ -70,7 +70,7 @@ def post(s: requests.Session, path: str, params: dict[str, str]) -> dict[str, An
     raise RuntimeError("unreachable")
 
 
-def fetch_plans(s: requests.Session, province_id: str, city_id: str) -> list[dict[str, Any]]:
+def fetch_plans(s: requests.Session, province_id: str, city_id: str, deadline: float | None = None) -> list[dict[str, Any]]:
     """Fetch all mobile plans (套餐/移网) for one region."""
     rows: list[dict[str, Any]] = []
     # all ids for 套餐->移网
@@ -117,6 +117,11 @@ def fetch_plans(s: requests.Session, province_id: str, city_id: str) -> list[dic
                     rows.append((record, scope, f"{first_name}/{second_name}"))
                 print(f"  {scope} {first_name}/{second_name}: +{len(batch)} (total {len(rows)})")
                 time.sleep(1)
+                # 批间软超时：main 的 deadline 检查在本函数完整返回后才轮得到，
+                # 必须在批循环内部检查才能真正防住接口挂死
+                if deadline is not None and time.monotonic() > deadline:
+                    print(f"SOFT-TIMEOUT in fetch_plans: returning {len(rows)} rows early")
+                    return rows
     return rows
 
 
@@ -250,7 +255,12 @@ def main() -> int:
     parser.add_argument("--city-id", default="110")
     parser.add_argument("--min-records", type=int, default=20)
     parser.add_argument("--delay", type=float, default=1.0)
+    # 软超时：到点优雅退出（落盘已有行、exit 3），让流水线的 `|| echo 单源失败` 兜底接住、
+    # 合并/发布照常执行。09-30 两次实证联通源在 CNB 出口下会以 600s 强杀 / 680s 挂死两种
+    # 形态失败——外部强杀连 `|| echo` 都接不住，必须自己按时收场。
+    parser.add_argument("--soft-limit", type=int, default=480)
     args = parser.parse_args()
+    deadline = time.monotonic() + args.soft_limit
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,15 +271,22 @@ def main() -> int:
     print(f"user region: {prov_name} ({args.province_id}/{args.city_id})")
 
     rows: list[dict[str, Any]] = []
-    for raw, scope, category in fetch_plans(s, args.province_id, args.city_id):
+    for raw, scope, category in fetch_plans(s, args.province_id, args.city_id, deadline=deadline):
         record = normalize(raw, scope, category)
         rows.append(record)
+        if time.monotonic() > deadline:
+            print(f"SOFT-TIMEOUT after {args.soft_limit}s: flushing {len(rows)} rows and exiting")
+            break
         if args.delay > 0:
             time.sleep(args.delay)
 
     if len(rows) < args.min_records:
+        # 部分行也要落盘：三源合并按文件聚合，联通当轮缺席不应连已抓到的行一起丢
+        if rows:
+            out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+            print(f"wrote partial {len(rows)} rows to {out_path}")
         print(f"FAIL: only {len(rows)} rows (< {args.min_records})", file=sys.stderr)
-        return 2
+        return 3 if time.monotonic() > deadline else 2
 
     out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"OK: {len(rows)} rows -> {out_path}")
