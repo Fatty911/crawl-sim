@@ -246,11 +246,18 @@ main:
             mkdir -p dist
             python scripts/merge_data.py --data-dir data --output dist/merged.json
             python - <<'PY'
-            import json
+            import json, sys
             rows = json.load(open('dist/merged.json', encoding='utf-8'))
             shown = [r for r in rows if r.get('default_show')]
-            assert len(rows) >= 20, f"merged too small: {len(rows)}"
-            assert len(shown) >= 5, f"default shown too small: {len(shown)}"
+            # 零行＝四源全空/全缺，发布只会刷空线上，硬失败；部分行（单源缺席轮）警告后照常发布：
+            # 爬取是全量快照式重爬，缺源只是该源本轮缺席、下轮补回，不发布反而让整站停在更旧的日期。
+            # 09-30 实证（sn=cnb-k0o-1k3ovkac0）：源行数不足 min-records 时脚本不写文件、stage 被
+            # `|| echo` 兜成 success，merge 全跳过 → 0 行 → 此前 assert 直接炸掉合并腿。
+            if len(rows) == 0:
+                print("❌ merged 0 rows: 四源全空，拒绝发布（防刷空线上）", file=sys.stderr)
+                sys.exit(1)
+            if len(rows) < 20 or len(shown) < 5:
+                print(f"⚠️ merged thin: rows={len(rows)} shown={len(shown)}（部分源缺席轮，照常发布）")
             PY
             # 本仓 merge_data.py 未定义 build_identity_key/atomic_sources 等符号，
             # scripts/verify_publish_superset.py 与 prepare_pages_payload.py 导入即 ImportError（GitHub 原链路同样从未调用它们），
@@ -264,9 +271,13 @@ main:
             cand = {key(r) for r in rows}
             base_shown = {key(r) for r in base if r.get('default_show')}
             missing = base_shown - cand
+            # GitHub 原链路是「四源 artifact 全到齐才合并」，不存在部分数据轮；CNB 单源易挂，
+            # 部分数据轮的基线缺失是该源本轮缺席的自然结果（快照式全量重爬、下轮补回），
+            # 硬失败会让整站停在更旧日期——降级为警告列出缺失，零候选行仍硬失败（上方已拦）。
             if missing:
-                raise SystemExit(f"❌ publish shrink: 基线在展计划缺失 {len(missing)} 条，例: {sorted(base_shown - cand)[:3]}")
-            print(f"superset verified: 基线在展 {len(base_shown)} 条全部保留")
+                print(f"⚠️ superset: 基线在展计划缺失 {len(missing)} 条（源缺席轮），例: {sorted(base_shown - cand)[:3]}")
+            else:
+                print(f"superset verified: 基线在展 {len(base_shown)} 条全部保留")
             # 对齐 GitHub merge-and-filter.yml:111-118：latest=在展子集，filtered=全量（app.js:259 需要 data/filtered.json）
             shown = [r for r in rows if r.get('default_show')]
             json.dump(shown, open('dist/latest.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
