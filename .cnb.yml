@@ -345,7 +345,14 @@ main:
               sleep 10
             done
             rm -f /tmp/cb-askpass.sh
-            [ "$OK" = 1 ] || { echo "❌ Codeberg 连续三次推送失败"; exit 1; }
+            # 09-30 最后一轮验证（sn=cnb-rnm-1k3q7mer0）：三连重试仍全挂（32s）——CNB 容器到
+            # Codeberg 的推送链路间歇劣化已非重试可解。sim3 只是镜像域（CF sim2 是主发布且
+            # 已在上一段成功），镜像缺口不应砍掉其后的线上验收（vps 仓同款语义）。
+            if [ "$OK" = 1 ]; then
+              echo "SIM3_PUSH=done"
+            else
+              echo "⚠️ Codeberg 三次推送失败，sim3 镜像本轮落后（主发布 sim2 不受影响），继续"
+            fi
             rm -rf "$W"
         - name: 线上验收
           script: |
