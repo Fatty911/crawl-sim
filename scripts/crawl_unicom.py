@@ -91,7 +91,8 @@ def fetch_plans(s: requests.Session, province_id: str, city_id: str) -> list[dic
                 params["cityId"] = city_id
             else:
                 params["provinceId"] = ""
-                params["cityId"] = ""
+            params["cityId"] = ""
+            print(f"  fetching {scope}/{first_name}/{second_level}")
             data = post(s, "queryTariffNew/threeLevelName", params)
             ids = [item["id"] for item in data.get("data", {}).get("dataList", [])]
             if not ids:
@@ -237,6 +238,12 @@ def contract_desc(name: str, content: str) -> str:
 
 
 def main() -> int:
+    # CNB 对"连续 10 分钟无输出"的 job 会强杀（600084ms 实证，Job 级 timeout 声明不覆盖该机制）；
+    # stdout 在管道下是全缓冲，慢源的小量 print 长时间凑不满缓冲块即表现为"无输出"——切行缓冲保活
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="data/unicom.json")
     parser.add_argument("--province-id", default="011")
