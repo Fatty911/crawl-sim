@@ -1,0 +1,159 @@
+# crawl-sim — CNB AI 自修复工作流（分阶段+缓存+有界重试）
+# 借鉴旧工作流：分阶段流水线、成功步骤缓存、从报错步骤恢复、有界重试、受保护文件备份
+# 模型: deepseek-v4-flash (免费 CodeBuddy V4.1 Flash)
+
+main:
+  push:
+    - docker:
+        image: python:3.11
+      env:
+        GITLAB_TOKEN: ${GITLAB_TOKEN}
+      stages:
+        - name: install-deps
+          script: pip install -r requirements.txt 2>/dev/null || true
+        - name: 推送代码到GitLab
+          script: |
+            git remote remove gitlab 2>/dev/null || true
+            git remote add gitlab https://oauth2:${GITLAB_TOKEN}@gitlab.com/xuerui911/crawl-sim.git
+            git push gitlab main --force-with-lease 2>/dev/null || git push gitlab main
+            echo "GITLAB_PUSH=done" >> _stage_context_.env
+        - name: pytest
+          script: |
+            python -m pytest tests/ -x --tb=short 2>&1 | tee _test_result_.txt
+            echo "PYTEST_EXIT=$?" >> _stage_context_.env
+        - name: 语法校验
+          script: |
+            python -m py_compile scripts/*.py 2>/dev/null && echo "SYNTAX=PASS" >> _stage_context_.env || echo "SYNTAX=FAIL" >> _stage_context_.env
+      failStages:
+        - name: 诊断-收集失败上下文
+          script: |
+            {
+              echo "## 失败概览"
+              echo "| 项目 | 内容 |"
+              echo "| --- | --- |"
+              echo "| 失败阶段 | $CNB_BUILD_FAILED_STAGE_NAME |"
+              echo "| 失败原因 | \`$CNB_BUILD_FAILED_MSG\` |"
+              echo "| 触发分支 | $CNB_BRANCH |"
+              echo "| 提交 | $CNB_COMMIT_SHORT |"
+              echo "| 构建日志 | $CNB_BUILD_WEB_URL |"
+              echo ""
+              echo "## 测试输出（最后50行）"
+              echo '```'"
+              tail -50 _test_result_.txt 2>/dev/null || echo "(无)"
+              echo '```'
+              echo ""
+              echo "## 阶段上下文"
+              cat _stage_context_.env 2>/dev/null || echo "(无)"
+            } > _fail_context_.md
+        - name: 备份受保护文件
+          script: |
+            for f in AGENTS.md ai_tools/opencode/opencode.json ai_tools/opencode/oh-my-openagent.json; do
+              [ -f "$f" ] && cp "$f" "${f}.protected_backup"
+            done
+        - name: AI-修复-第1轮
+          type: npc:go
+          options:
+            model: deepseek-v4-flash
+            thinkingLevel: max
+            maxTurns: 40
+            contextWindow: 256k
+            systemPrompt: |
+              你是运营商资费爬虫修复专家。阅读 _fail_context_.md 中的失败上下文。
+              这是第1轮修复（最多2轮）。分析根因后修改代码。
+              规则：不伪造数据、不折叠真冲突、不删校验、不降防护。
+              多期总价折算优先级正确，排除购机合约，月租>200不进Pages。
+              修复后写报告到 _fix_report_.md。
+            userPrompt: |
+              读取 _fail_context_.md，分析失败并修复。修复后写报告到 _fix_report_.md。
+        - name: 恢复受保护文件
+          script: |
+            for f in AGENTS.md ai_tools/opencode/opencode.json ai_tools/opencode/oh-my-openagent.json; do
+              if [ -f "${f}.protected_backup" ] && ! cmp -s "$f" "${f}.protected_backup" 2>/dev/null; then
+                echo "⚠️ 恢复受保护文件 $f"
+                cp "${f}.protected_backup" "$f"
+              fi
+            done
+            find . -name '*.protected_backup' -delete
+        - name: 验证-语法校验
+          script: |
+            python -m py_compile scripts/*.py 2>/dev/null && echo "SYNTAX_VALIDATE=PASS" >> _fix_report_.md || { echo "SYNTAX_VALIDATE=FAIL" >> _fix_report_.md; exit 1; }
+        - name: 验证-pytest
+          script: |
+            python -m pytest tests/ -x --tb=short 2>&1 | tee _test_after_fix_.txt
+            if [ $? -eq 0 ]; then echo "PYTEST_VALIDATE=PASS" >> _fix_report_.md; else echo "PYTEST_VALIDATE=FAIL" >> _fix_report_.md; fi
+        - name: 审查-NPC代码审查
+          type: npc:go
+          options:
+            model: deepseek-v4-flash
+            thinkingLevel: high
+            maxTurns: 15
+            contextWindow: 128k
+            systemPrompt: |
+              你是代码审查员。读取 _fail_context_.md、_fix_report_.md、_test_after_fix_.txt。
+              检查：资费折算正确性、发布过滤、宽带视图完整性、排除购机合约、测试断言同步。
+              写审查结果到 _review_result_.md，第一行 VERDICT: PASS 或 VERDICT: FAIL。
+            userPrompt: |
+              审查修复结果，输出到 _review_result_.md。
+        - name: 最终判定
+          script: |
+            VERDICT=$(head -1 _review_result_.md 2>/dev/null | grep -o 'PASS\|FAIL' || echo "UNKNOWN")
+            echo "审查结果: $VERDICT"
+            [ "$VERDICT" = "PASS" ] && echo "✅ 修复通过" || { echo "❌ 修复未通过"; exit 1; }
+
+  "crontab: 0 8,20 * * *":
+    - docker:
+        image: python:3.11
+      stages:
+        - name: install-deps
+          script: pip install -r requirements.txt 2>/dev/null || true
+        - name: health-check
+          script: |
+            python -m scripts.health_check > _health_report_.json 2>&1
+            cat _health_report_.json
+        - name: 判断是否需要修复
+          script: |
+            python3 -c "import json; d=json.load(open('_health_report_.json')); exit(0 if d.get('issues') else 1)" 2>/dev/null || exit 0
+        - name: AI-诊断并修复
+          type: npc:go
+          options:
+            model: deepseek-v4-flash
+            thinkingLevel: max
+            maxTurns: 50
+            contextWindow: 256k
+            systemPrompt: |
+              你是资费数据质量修复 Agent。读取 _health_report_.json。
+              检查：月租折算正确性、宽带视图完整性、发布过滤（>200排除）、三视图数据一致性。
+              追溯数据流修复，运行 pytest 验证。
+            userPrompt: 分析健康检查报告并修复。
+
+  pull_request:
+    - stages:
+        - name: NPC-PR审查
+          type: npc:go
+          options:
+            model: deepseek-v4-flash
+            thinkingLevel: high
+            maxTurns: 20
+            systemPrompt: |
+              你是代码审查员。审查PR：资费折算逻辑、发布过滤（>200排除）、宽带视图、测试断言同步。
+              给出 PASS 或 FAIL 及理由。
+            userPrompt: 审查本次 PR 的代码变更。
+
+$:
+  issue.open:
+    - stages:
+        - name: 检查fix标签
+          script: echo "$CNB_ISSUE_LABELS" | grep -q 'fix' || exit 0
+        - name: AI-Issue驱动修复
+          type: npc:go
+          options:
+            model: deepseek-v4-flash
+            thinkingLevel: max
+            maxTurns: 50
+            contextWindow: 256k
+            systemPrompt: |
+              你是自动化修复 Agent。读取 Issue，理解需求，读代码定位，修改，运行 pytest，创建 PR。
+              规则：不伪造数据、不折叠真冲突、不删校验、不降防护
+            userPrompt: |
+              Issue 标题: $CNB_ISSUE_TITLE
+              Issue 描述: $CNB_ISSUE_DESCRIPTION

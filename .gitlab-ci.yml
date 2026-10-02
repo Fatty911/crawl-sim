@@ -1,0 +1,22 @@
+# GitLab Pages 部署 — 爬虫筛选中心
+# 仅在 Pages 面向用户的文件变更时触发，节省 CI 分钟
+pages:
+  stage: deploy
+  script:
+    - echo "Deploying pages from docs/"
+  artifacts:
+    paths:
+      - docs
+  publish: docs
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - docs/index.html
+        - docs/app.js
+        - docs/style.css
+        - docs/styles.css
+        - docs/config.js
+        - docs/_headers
+        - docs/CNAME
+        - docs/data/latest.json
+        - docs/data/manifest.json
