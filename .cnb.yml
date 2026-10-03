@@ -218,26 +218,35 @@ main:
             done
             echo "❌ 所有基线来源均不可用，禁止本轮发布（绝不退化为空基线）"
             exit 1
-        - name: 爬取-广电
+        - name: 爬取-四源并行
           script: |
             . /tmp/proxy.sh
-            python scripts/crawl_broadnet.py --output data/broadnet.json --min-records 50 \
-              || echo "广电 单源失败，继续其它源"
-        - name: 爬取-移动
-          script: |
-            . /tmp/proxy.sh
-            python scripts/crawl_mobile.py --output data/mobile.json --min-records 60 \
-              || echo "移动 单源失败，继续其它源"
-        - name: 爬取-电信
-          script: |
-            . /tmp/proxy.sh
-            python scripts/crawl_telecom.py --output data/telecom.json --min-records 80 \
-              || echo "电信 单源失败，继续其它源"
-        - name: 爬取-联通
-          script: |
-            . /tmp/proxy.sh
-            python scripts/crawl_unicom.py --output data/unicom.json --min-records 100 \
-              || echo "联通 单源失败，继续其它源"
+            # 时段分档（用户裁定 2026-10-01）：夜间（23:00-08:00，容器时区 Asia/Shanghai）
+            # 自动小批量——每源 min-records 20、联通软超时缩到 300s，让全链（合并→发布）
+            # 夜里也能完整推进不被长爬拖死；日间恢复全量。增量合并下两种量级的数据都入库。
+            HOUR=$(date +%H)
+            if [ "$HOUR" -ge 23 ] || [ "$HOUR" -lt 8 ]; then
+              MODE="夜间小批量"; BN_MR=20; MO_MR=20; TE_MR=20; UN_MR=20; UN_SL=300
+            else
+              MODE="日间全量";   BN_MR=50; MO_MR=60; TE_MR=80; UN_MR=100; UN_SL=480
+            fi
+            echo "爬取模式：$MODE（hour=$HOUR）"
+            # 四源并行（用户裁定 2026-10-01：源间并行、单源任何形态失败都不拖垮其它源与下游）。
+            # 各源自带 `|| echo` 兜底（任何退出码都转 success）且互为后台任务——被强杀/挂死也
+            # 只影响自身；wait 后无论结果都继续，合并腿对 0 行有硬失败防线、部分行警告发布。
+            # 四源并发输出轮流到达，天然规避 CNB「连续 10 分钟无输出强杀」（串行时代联通独享
+            # 静默期被杀，sn=cnb-dks 前 shifting 实证）。
+            python scripts/crawl_broadnet.py --output data/broadnet.json --min-records "$BN_MR" \
+              || echo "⚠️ 广电 单源失败" &
+            python scripts/crawl_mobile.py --output data/mobile.json --min-records "$MO_MR" \
+              || echo "⚠️ 移动 单源失败" &
+            python scripts/crawl_telecom.py --output data/telecom.json --min-records "$TE_MR" \
+              || echo "⚠️ 电信 单源失败" &
+            python scripts/crawl_unicom.py --output data/unicom.json --min-records "$UN_MR" --soft-limit "$UN_SL" \
+              || echo "⚠️ 联通 单源失败" &
+            wait
+            echo "四源并行结束（$MODE），data/ 产物："
+            ls -la data/*.json 2>/dev/null || echo "（无任何 json 产物）"
         - name: 清理代理环境
           script: python scripts/setup_proxy_runtime.py --clear
         - name: 合并-校验-保留基线
