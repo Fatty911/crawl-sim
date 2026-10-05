@@ -36,6 +36,16 @@ def fetch_json(url: str, timeout: int = 30) -> dict | list:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def has_explicit_traffic_text(text: str) -> bool:
+    """显式流量单位证据：TB/T 任意数值，或大 GB/G 数值。"""
+    return bool(re.search(
+        r"(?:\d+(?:\.\d+)?\s*(?:TB|T)(?![0-9A-Za-z])|"
+        r"(?:[5-9]\d{2,}|\d{4,})\s*(?:GB|G)(?![0-9A-Za-z]))",
+        text,
+        re.IGNORECASE,
+    ))
+
+
 def check_data(report: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     try:
@@ -56,6 +66,12 @@ def check_data(report: dict[str, Any]) -> list[str]:
         errors.append(f"filtered.json 仅 {len(rows)} 行 (< 50)")
     if len(report["sources"]) < 3:
         errors.append(f"数据源不足: {report['sources']} (< 3)")
+
+    # 月租>200 高端套餐不得出现在发布数据（非富即贵过滤）
+    high_fee = [r.get("plan_name", "") for r in rows if (r.get("monthly_fee") or 0) > 200]
+    report["high_fee_rows"] = len(high_fee)
+    if high_fee:
+        errors.append(f"发布数据含月租>200 元套餐 {len(high_fee)} 条: {high_fee[:2]}")
 
     shown = [r for r in rows if r.get("default_show")]
     report["default_show_count"] = len(shown)
@@ -80,12 +96,14 @@ def check_data(report: dict[str, Any]) -> list[str]:
         errors.append(f"默认推荐有 {rule_broken} 条不满足发布规则")
 
     # implausible traffic (>512G) without explicit text support
+    # TB/T 也是合法显式单位：1T→1024GB（FWA 真实详情卡），不能按“>512 未解释”拦截。
     suspect = [
         r.get("plan_name", "")
         for r in rows
         if (r.get("general_traffic_gb") or 0) > 512
-        and not re.search(r"(?:[5-9]\d{2,}|\d{4,})\s*(?:GB|G|TB|T)\b",
-                          f"{r.get('plan_name','')} {r.get('service_content','')[:200]}")
+        and not has_explicit_traffic_text(
+            f"{r.get('plan_name','')} {r.get('service_content','')[:200]}"
+        )
     ]
     if suspect:
         errors.append(f"{len(suspect)} 条流量异常(>512G 无文本佐证): {suspect[:3]}")
@@ -94,6 +112,24 @@ def check_data(report: dict[str, Any]) -> list[str]:
     report["broadband_count"] = len(bb)
     if not bb:
         errors.append("无宽带套餐数据")
+    # 校园专属宽带（限制高校区域）不得进入公开 Pages
+    campus = [r for r in rows if r.get("excluded_campus")]
+    report["campus_excluded_count"] = len(campus)
+    if campus:
+        names = "、".join(str(r.get("plan_name", ""))[:18] for r in campus[:3])
+        errors.append(f"发布数据含 {len(campus)} 条校园专属宽带（不应进入 Pages）: {names}")
+    # 宽带字段：过渡期旧 release 数据可能尚未带 broadband_mbps（字段缺失仅报告不报错）；
+    # 字段存在但全部为空视为带宽提取失效。
+    has_bw_field = any("broadband_mbps" in r for r in bb)
+    report["broadband_mbps_field"] = has_bw_field
+    if has_bw_field:
+        with_bw = [r for r in bb if r.get("broadband_mbps")]
+        report["broadband_with_bw_count"] = len(with_bw)
+        report["broadband_access_count"] = len([r for r in bb if r.get("access_method")])
+        if not with_bw:
+            errors.append("宽带行均无 broadband_mbps（带宽提取失效）")
+    else:
+        report["broadband_with_bw_count"] = None
     return errors
 
 
@@ -144,6 +180,25 @@ def check_ui(report: dict[str, Any]) -> list[str]:
             report["broadband_view_rows"] = bb_cnt
             if bb_cnt < 1:
                 errors.append("宽带套餐视图无数据行")
+            # 宽带视图表头必须含带宽/接入方式列
+            bb_head = page.evaluate(
+                """() => {
+                  const tr = document.getElementById('th-broadband');
+                  return tr ? [...tr.querySelectorAll('th')].map(x => x.innerText.trim()) : [];
+                }"""
+            )
+            report["broadband_head"] = bb_head
+            head_text = " ".join(bb_head)
+            for expect in ("带宽", "接入方式"):
+                if expect not in head_text:
+                    errors.append(f"宽带视图缺少表头: {expect}")
+            if bb_cnt > 0:
+                bb_cols = page.evaluate(
+                    "() => { const row = document.querySelector('#tbody tr'); return row ? row.querySelectorAll('td').length : 0; }"
+                )
+                report["broadband_cols"] = bb_cols
+                if bb_cols != 9:
+                    errors.append(f"宽带视图行 {bb_cols} 列 (期望 9)")
 
             # all view
             page.evaluate(

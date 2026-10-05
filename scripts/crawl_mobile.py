@@ -216,18 +216,41 @@ async def run() -> list[dict[str, Any]]:
                     range_tab,
                 )
                 await page.wait_for_timeout(8000)
+                # 页面初始可能处于“未找到符合条件”空状态（实测 2026-08-11），
+                # 仅在列表为空时点击 资费类型=套餐 触发加载；列表已有卡则不点
+                # （避免把流量包过滤掉——默认“全部”含流量包）
+                empty_state = await page.evaluate(
+                    """() => {
+                        const t = document.body.innerText || '';
+                        return t.includes('未找到符合条件') || !document.querySelector('.tariff-item-container');
+                    }"""
+                )
+                if empty_state:
+                    await page.evaluate(
+                        """() => {
+                            const els = [...document.querySelectorAll('*')].filter(e => {
+                                return (e.childElementCount === 0) && (e.innerText||'').trim() === '套餐';
+                            });
+                            if (els.length) { els[els.length - 1].click(); return els.length; }
+                            return 0;
+                        }"""
+                    )
+                    await page.wait_for_timeout(8000)
+                    print(f"  {range_tab}: list was empty, clicked 套餐 type")
                 # scroll step by step, collecting cards at every stop (virtual scrolling);
-                # then scroll back to top and sweep down again to force all rows to render
+                # then scroll back to top and sweep down again to force all rows to render.
+                # small steps (800px) + render wait: waterfall layout drops cards on
+                # big jumps (芒果卡宽带版 曾被漏掉)
                 collected = []
                 for sweep in range(2):
                     prev = 0
-                    for _ in range(30):
+                    for _ in range(60):
                         raw_cards = await extract_cards(page)
                         for text in raw_cards:
                             if text not in collected:
                                 collected.append(text)
-                        await page.mouse.wheel(0, 1500)
-                        await page.wait_for_timeout(1500)
+                        await page.mouse.wheel(0, 800)
+                        await page.wait_for_timeout(700)
                         cur = await page.evaluate("() => document.body.innerText.length")
                         if cur == prev and not raw_cards:
                             break
@@ -236,6 +259,10 @@ async def run() -> list[dict[str, Any]]:
                         # jump back to top for the second sweep
                         await page.evaluate("() => window.scrollTo(0, 0)")
                         await page.wait_for_timeout(3000)
+                # final sweep after scrolling to the very bottom
+                for _ in range(20):
+                    await page.mouse.wheel(0, 2000)
+                    await page.wait_for_timeout(500)
                 raw_cards = await extract_cards(page)
                 for text in raw_cards:
                     if text not in collected:
@@ -244,7 +271,8 @@ async def run() -> list[dict[str, Any]]:
                     break
                 print(f"  {range_tab} tab produced 0 cards on attempt {tab_attempt + 1}; retrying")
                 await page.wait_for_timeout(8000)
-            print(f"  {range_tab}: {len(collected)} cards")
+            mango_cnt = sum(1 for c in collected if "芒果" in c)
+            print(f"  {range_tab}: {len(collected)} cards (芒果卡 {mango_cnt})")
             for text in collected:
                 card = parse_card(text)
                 if card:

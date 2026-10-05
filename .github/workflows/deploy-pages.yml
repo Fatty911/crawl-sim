@@ -163,3 +163,297 @@ jobs:
         run: |
           gh workflow run ai-sim-repair.yml --repo "$GITHUB_REPOSITORY" --ref main \
             -f attempt=1 || echo "repair dispatch failed (non-blocking)"
+
+  ai-audit:
+    needs: [deploy, verify]
+    if: always() && needs.deploy.result == 'success' && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@main
+
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@main
+        with:
+          node-version: "22"
+
+      - name: Install deps + playwright + opencode
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install playwright==1.61.0
+          python -m playwright install chromium-headless-shell
+          npm install --global opencode-ai@latest
+
+      - name: Collect page audit (render JS + scan accuracy/readability)
+        id: audit
+        continue-on-error: true
+        run: |
+          python scripts/audit_pages_ai.py \
+            --output "$RUNNER_TEMP/pages-audit-report.json" \
+            --prompt "$RUNNER_TEMP/pages-audit-prompt.md"
+
+      - name: Probe AI endpoints (NIM -> zenmux-free fallback)
+        id: probe_ai
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+          ZENMUX_API_KEY: ${{ secrets.ZENMUX_API_KEY }}
+          DMIT_PROXY_URL: ${{ secrets.DMIT_PROXY_URL }}
+        run: |
+          # 免费端点池自动切换：NIM（直连，529 风控重试）→ zenmux-free（走 DMIT 代理，CF 403）
+          # 用真实 chat 调用探测（models 200 不代表 chat 可用——zenmux key 按模型授权）
+          NIM_OK=false
+          for i in 1 2 3; do
+            # bash -e 下 curl 超时(exit 28)会直接终止脚本：探测是容错设计，
+            # 失败必须走重试/fallback，不能炸 job。|| true 吞掉非零退出码。
+            code=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" \
+              https://integrate.api.nvidia.com/v1/chat/completions \
+              -H "Authorization: Bearer $NVIDIA_NIM_API_KEY" -H "Content-Type: application/json" \
+              -d '{"model":"deepseek-ai/deepseek-v4-flash-0731","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' || true)
+            echo "NIM probe attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then NIM_OK=true; break; fi
+            sleep 10
+          done
+          ZENMUX_OK=false
+          if [ -n "$DMIT_PROXY_URL" ]; then
+            for i in 1 2 3; do
+              code=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" -x "$DMIT_PROXY_URL" \
+                https://zenmux.ai/api/v1/chat/completions \
+                -H "Authorization: Bearer $ZENMUX_API_KEY" -H "Content-Type: application/json" \
+                -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' || true)
+              echo "zenmux probe attempt $i: HTTP $code"
+              if [ "$code" = "200" ]; then ZENMUX_OK=true; break; fi
+              sleep 10
+            done
+          fi
+          echo "nim_ok=$NIM_OK" >> "$GITHUB_OUTPUT"
+          echo "zenmux_ok=$ZENMUX_OK" >> "$GITHUB_OUTPUT"
+          echo "probe result: nim=$NIM_OK zenmux=$ZENMUX_OK"
+
+      - name: AI review audit report
+        id: ai_review
+        continue-on-error: true
+        env:
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+          ZENMUX_API_KEY: ${{ secrets.ZENMUX_API_KEY }}
+          VOLCENGINE_CODING_PLAN_API_KEY: ${{ secrets.VOLCENGINE_CODING_PLAN_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DMIT_PROXY_URL: ${{ secrets.DMIT_PROXY_URL }}
+          PROBE_NIM_OK: ${{ steps.probe_ai.outputs.nim_ok }}
+          PROBE_ZENMUX_OK: ${{ steps.probe_ai.outputs.zenmux_ok }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys, time
+          sys.path.insert(0, os.getcwd())           # 仓库根
+          sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))  # ai_providers.py 所在目录
+          from ai_providers import PROVIDERS as _ALL_PROVIDERS
+          from ai_providers import apply_proxy_env as _apply_proxy_env
+          from ai_providers import build_opencode_config as _build_config
+          prompt_file = os.path.join(os.environ["RUNNER_TEMP"], "pages-audit-prompt.md")
+          # 免费端点池（NIM 直连 + zenmux-free 代理）+ 付费 Plan + 按量付费，按用户费用策略排序：
+          # 免费优先 → 单家 Plan → 聚合 Plan → 便宜按量。探测结果决定顺序，调用失败自动切换。
+          providers = []
+          for p in _ALL_PROVIDERS:
+              if not os.environ.get(p["key_env"], "").strip():
+                  continue  # 该端点的 key 未配置（secrets 缺失），跳过
+              p = dict(p)  # 拷贝，避免污染 ai_providers 模块级共享字典
+              if p["name"] == "nvidia-nim":
+                  p["probe_ok"] = os.environ.get("PROBE_NIM_OK", "") == "true"
+              elif p["name"] == "zenmux-free":
+                  p["probe_ok"] = os.environ.get("PROBE_ZENMUX_OK", "") == "true"
+              else:
+                  p["probe_ok"] = False  # 付费端点不预探测（省调用），失败自然切换
+              providers.append(p)
+          # 探测 OK 的排前（免费层优先）；探测全挂时按池顺序仍尝试（探测可能误判）
+          providers.sort(key=lambda p: (not p["probe_ok"], p["tier"] != "free", p["name"] != "nvidia-nim"))
+          read_only = {
+              "*": "deny", "read": "allow", "edit": "deny", "bash": "deny",
+              "webfetch": "deny", "task": "deny", "question": "deny", "external_directory": "deny",
+          }
+          config = _build_config(providers, max_tokens=8000)
+          env = dict(os.environ)
+          env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, ensure_ascii=False)
+          env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+          env["OPENCODE_DISABLE_TELEMETRY"] = "1"
+          proxy = os.environ.get("DMIT_PROXY_URL", "").strip()
+
+          def parse_verdict(text: str):
+              """鲁棒提取 JSON 结论：优先 ```json 代码块，再用 JSONDecoder.raw_decode
+              逐个 { 起点解析完整 JSON 值（天然容忍尾部垃圾文本）。
+              NIM 免费层偶发输出退化（循环垃圾文本包围 JSON，2026-08-11 实测）。"""
+              import re as _re
+              dec = json.JSONDecoder()
+              cands = _re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.S)
+              starts = [m.start() for m in _re.finditer(r"\{", text)]
+              for cand in cands:
+                  try:
+                      v = json.loads(cand)
+                      if isinstance(v, dict) and str(v.get("conclusion", "")).upper() in ("OK", "BROKEN", "NEEDS_ATTENTION"):
+                          return v
+                  except Exception:
+                      continue
+              for i in starts:
+                  try:
+                      v, _ = dec.raw_decode(text, i)
+                      if isinstance(v, dict) and str(v.get("conclusion", "")).upper() in ("OK", "BROKEN", "NEEDS_ATTENTION"):
+                          return v
+                  except Exception:
+                      continue
+              return None
+
+          # 审计收集失败（无报告/prompt）时不得静默吞掉：强制 NEEDS_ATTENTION
+          if not os.path.isfile(prompt_file):
+              msg = "AI 页面审计：审计收集步骤失败（未生成报告），需人工查看 run 日志"
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(json.dumps({"conclusion": "NEEDS_ATTENTION", "summary": msg, "real_issues": [{"severity": "error", "item": "audit collection", "reason": msg, "suggestion": "查看 workflow run 日志定位失败原因"}], "audit_failed": True}, ensure_ascii=False, indent=1))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              print("audit collection failed -> NEEDS_ATTENTION issue")
+              raise SystemExit(0)
+
+          verdict = None
+          last_err = ""
+          # 总尝试：每轮按 provider 顺序尝试（NIM→zenmux），成功（解析出合法结论）即停；
+          # 输出退化/不可解析视为该 provider 失败，自动切换下一个。
+          for round_no in range(4):
+              for p in providers:
+                  cmd = [
+                      "opencode", "run", "--pure", "--agent", "plan",
+                      "--model", "%s/%s" % (p["name"], p["model"]),
+                      "--format", "default", "--dir", os.environ["RUNNER_TEMP"],
+                      "Review the attached page-audit report. Output ONLY the requested JSON (no markdown fence, no extra text).",
+                      "--file", prompt_file,
+                  ]
+                  run_env = _apply_proxy_env(env, p, proxy)
+                  try:
+                      out = subprocess.run(cmd, env=run_env, capture_output=True, text=True, timeout=840)
+                      if out.returncode == 0:
+                          verdict = parse_verdict(out.stdout)
+                      if verdict is not None:
+                          print(f"AI review OK via provider={p['name']} model={p['model']}")
+                          break
+                      last_err = f"provider={p['name']} exit={out.returncode} output-unparseable"
+                  except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+                      last_err = f"provider={p['name']} {type(exc).__name__}: {str(exc)[:150]}"
+                  print(f"AI review round {round_no + 1} failed: {last_err}")
+                  time.sleep(15)
+              if verdict is not None:
+                  break
+          if verdict is None:
+              # 全部端点耗尽：continue-on-error 会吞掉异常，必须显式强制 NEEDS_ATTENTION
+              forced = {"conclusion": "NEEDS_ATTENTION",
+                        "summary": f"AI 页面审计：全部免费端点审查失败（{last_err}），需人工查看 run 日志",
+                        "real_issues": [{"severity": "error", "item": "ai review", "reason": last_err,
+                                         "suggestion": "查看 workflow run 日志与 pages-ai-audit artifact；检查 NVIDIA_NIM_API_KEY/ZENMUX_API_KEY"}],
+                        "forced": True}
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(json.dumps(forced, ensure_ascii=False, indent=1))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              print("all free endpoints failed -> forced NEEDS_ATTENTION")
+              raise SystemExit(0)
+          ai_text = out.stdout.strip()
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "ai-review.md"), "w", encoding="utf-8") as fh:
+              fh.write(ai_text[-8000:] + "\n--- stderr tail ---\n" + out.stderr[-1500:])
+          print(ai_text[-4000:])
+          # verdict 已由 parse_verdict 提取（重试成功路径保证非 None）
+          conclusion = str(verdict.get("conclusion", "")).upper()
+          if conclusion not in ("OK", "BROKEN", "NEEDS_ATTENTION"):
+              # 非法结论值（UNKNOWN/拼写错误/缺失）视为 AI 输出不可用
+              conclusion = ""
+          # 审计报告含 error 级问题 → 即使 AI 判 OK 也强制 NEEDS_ATTENTION（防 AI 忽略）
+          report_error = False
+          try:
+              report = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "pages-audit-report.json"), encoding="utf-8"))
+              report_error = any(i.get("severity") == "error" for i in report.get("issues", []))
+          except Exception:
+              report_error = False
+          if not conclusion or report_error:
+              reason = "AI 审查结论非法" if not conclusion else "审计报告含 error 级问题"
+              forced = {"conclusion": "NEEDS_ATTENTION", "summary": f"AI 页面审计：{reason}（AI 原始输出与报告见 artifact）",
+                        "real_issues": [{"severity": "error", "item": "audit", "reason": reason,
+                                         "suggestion": "查看 pages-ai-audit artifact 的 ai-review.md 与 pages-audit-report.json"}],
+                        "forced": True}
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(json.dumps(forced, ensure_ascii=False, indent=1))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=true\n")
+              print(f"forced NEEDS_ATTENTION: {reason}")
+              raise SystemExit(0)
+          if conclusion in ("BROKEN", "NEEDS_ATTENTION"):
+              with open(os.path.join(os.environ["RUNNER_TEMP"], "audit-needs-attention"), "w", encoding="utf-8") as fh:
+                  fh.write(ai_text[-4000:])
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write(f"needs_attention=true\n")
+              print(f"AI audit conclusion: {conclusion} -> issue will be opened")
+          else:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write("needs_attention=false\n")
+              print(f"AI audit conclusion: {conclusion or 'UNPARSEABLE'} -> no issue")
+          PY
+
+      - name: Upload audit artifacts
+        if: always()
+        uses: actions/upload-artifact@main
+        with:
+          name: pages-ai-audit-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pages-audit-report.json
+            ${{ runner.temp }}/pages-audit-prompt.md
+            ${{ runner.temp }}/ai-review.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Open audit-failed issue
+        if: steps.ai_review.outputs.needs_attention == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          gh label create sim-pages-audit-failed --repo "$GITHUB_REPOSITORY" \
+            --color FBCA04 --description "Pages AI 审计发现需人工介入问题" 2>/dev/null || true
+          # 先捕获 issue 列表并检查失败（进程替换不传失败）；--limit 100 防默认 30 上限
+          ISSUES=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                --label sim-pages-audit-failed --json number --jq '.[].number' --limit 100) \
+            || { echo "::error::gh issue list 失败，中止新建"; exit 1; }
+          FAILED=0
+          while IFS= read -r N; do
+            [ -z "$N" ] && continue
+            gh issue close "$N" --repo "$GITHUB_REPOSITORY" || { echo "WARN: 关闭旧 issue #$N 失败"; FAILED=1; }
+          done <<< "$ISSUES"
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::旧 sim-pages-audit-failed issue 关闭失败，中止新建避免并存"
+            exit 1
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "Pages AI 审计: ${{ github.run_id }}" \
+            --label sim-pages-audit-failed \
+            --body "$(cat "$RUNNER_TEMP/audit-needs-attention")"
+
+      - name: Close audit issue when OK
+        if: steps.ai_review.outputs.needs_attention == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
+        run: |
+          ISSUES=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                --label sim-pages-audit-failed --json number --jq '.[].number' --limit 100) \
+            || { echo "::error::gh issue list 失败"; exit 1; }
+          CLOSED=0
+          FAILED=0
+          while IFS= read -r N; do
+            [ -z "$N" ] && continue
+            if gh issue close "$N" --repo "$GITHUB_REPOSITORY" \
+                --comment "AI 页面审计恢复 OK，自动关闭"; then
+              CLOSED=$((CLOSED + 1))
+            else
+              echo "WARN: 关闭 issue #$N 失败"
+              FAILED=1
+            fi
+          done <<< "$ISSUES"
+          echo "closed audit issues: $CLOSED"
+          if [ "$FAILED" = "1" ]; then exit 1; fi

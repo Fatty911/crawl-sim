@@ -8,6 +8,8 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   actions: write
@@ -73,8 +75,19 @@ jobs:
                           failed.append((name, run["databaseId"], run["conclusion"]))
 
           if not failed:
-              print("watchdog: no recent crawler failures")
-              raise SystemExit(0)
+              # 无爬虫失败时检查 AI 审计发现的 issue（渲染审计 sim-pages-audit-failed +
+              # 分类审计 sim-pages-classify-audit，任一存在即触发修复）
+              for label in ("sim-pages-audit-failed", "sim-pages-classify-audit"):
+                  audit = subprocess.run(
+                      ["gh", "issue", "list", "--repo", repo, "--state", "open", "--label", label,
+                       "--json", "number,title", "--limit", "100"], capture_output=True, text=True, timeout=60)
+                  audit_issues = json.loads(audit.stdout or "[]") if audit.returncode == 0 else []
+                  if audit_issues:
+                      print(f"watchdog: {label} issues ->", [(i.get("number"), (i.get("title") or "")[:40]) for i in audit_issues[:3]])
+                      failed.extend((f"{label}-issue", i["number"], "needs-repair") for i in audit_issues)
+              if not failed:
+                  print("watchdog: no recent crawler failures")
+                  raise SystemExit(0)
 
           print("watchdog: recent failures ->", failed)
           # ensure ai-sim-repair not already running / frozen
