@@ -230,6 +230,12 @@ main:
             else
               MODE="日间全量";   BN_MR=50; MO_MR=60; TE_MR=80; UN_MR=100; UN_SL=480
             fi
+            # debug_mode（对齐 GitHub workflow_dispatch inputs.debug_mode）：
+            # DEBUG_MODE=true 时强制小批量，过作息窗口也能跑通全链并刷新 Pages 日期
+            if [ "${DEBUG_MODE:-false}" = "true" ]; then
+              MODE="debug小批量"; BN_MR=20; MO_MR=20; TE_MR=20; UN_MR=20; UN_SL=240
+              echo "DEBUG_MODE=true: 强制小批量（每源 20 条）"
+            fi
             echo "爬取模式：$MODE（hour=$HOUR）"
             # 四源并行（用户裁定 2026-10-01：源间并行、单源任何形态失败都不拖垮其它源与下游）。
             # 各源自带 `|| echo` 兜底（任何退出码都转 success）且互为后台任务——被强杀/挂死也
@@ -467,6 +473,12 @@ main:
               MODE="夜间小批量"; BN_MR=20; MO_MR=20; TE_MR=20; UN_MR=20; UN_SL=300
             else
               MODE="日间全量";   BN_MR=50; MO_MR=60; TE_MR=80; UN_MR=100; UN_SL=480
+            fi
+            # debug_mode（对齐 GitHub workflow_dispatch inputs.debug_mode）：
+            # DEBUG_MODE=true 时强制小批量，过作息窗口也能跑通全链并刷新 Pages 日期
+            if [ "${DEBUG_MODE:-false}" = "true" ]; then
+              MODE="debug小批量"; BN_MR=20; MO_MR=20; TE_MR=20; UN_MR=20; UN_SL=240
+              echo "DEBUG_MODE=true: 强制小批量（每源 20 条）"
             fi
             echo "爬取模式：$MODE（hour=$HOUR）"
             # 四源并行（用户裁定 2026-10-01：源间并行、单源任何形态失败都不拖垮其它源与下游）。
