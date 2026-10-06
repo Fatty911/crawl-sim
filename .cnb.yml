@@ -162,14 +162,17 @@ main:
         cpus: 1
       docker:
         image: python:3.11
+      imports:
+        - https://cnb.cool/xuerui911-mirror/crawl-secrets/-/blob/main/env.yml
       timeout: 5m
       stages:
         - name: 诊断
           script: |
             echo "api_trigger OK"
             echo "DEBUG_MODE=${DEBUG_MODE:-unset}"
-            echo "CNB_BUILD_SN=$CNB_BUILD_SN"
-            env | sort | head -40
+            echo "PROXY_SUBSCRIPTIONS_set=$([ -n "$PROXY_SUBSCRIPTIONS" ] && echo yes || echo no)"
+            echo "CLOUDFLARE_API_TOKEN_set=$([ -n "$CLOUDFLARE_API_TOKEN" ] && echo yes || echo no)"
+            echo "CODEBERG_TOKEN_set=$([ -n "$CODEBERG_TOKEN" ] && echo yes || echo no)"
   "crontab: 0 4 7,22 * *":
     # 半月增量爬取（每月 7/22 日 04:00 Asia/Shanghai，四运营商源错峰）
     # 增量闭环：发布基线取线上站点当前数据（data/、dist/、docs/data 均被 .gitignore:2-4 忽略，发布物不入仓），发布前校验不缩小
