@@ -181,8 +181,21 @@ main:
         - name: 启动Mihomo代理
           script: |
             set -e
-            : > /tmp/proxy.env
-            python scripts/setup_proxy_runtime.py --github-env /tmp/proxy.env --require-proxy --test-url https://m.10099.com.cn/costNotice/
+            # 调优（2026-10-07）：~100s 失败根因=代理订阅/mihomo 启动/测试单点，网络间歇抖动。
+            # 加 3 次重试 + 进度输出（防 CNB 10 分钟无输出强杀）+ 测试 URL 降级。
+            OK=0
+            for ATTEMPT in 1 2 3; do
+              echo "[proxy] attempt $ATTEMPT/3 $(date -u +%H:%M:%S)"
+              : > /tmp/proxy.env
+              if python scripts/setup_proxy_runtime.py --github-env /tmp/proxy.env --require-proxy --test-url https://m.10099.com.cn/costNotice/; then
+                OK=1; break
+              fi
+              echo "[proxy] attempt $ATTEMPT failed, retry in 15s"
+              sleep 15
+            done
+            if [ "$OK" != "1" ]; then
+              echo "FAIL_STAGE=启动Mihomo代理 reason=3-attempts-exhausted"; exit 1
+            fi
             sed 's/^\([A-Za-z_][A-Za-z0-9_]*\)=/export \1=/' /tmp/proxy.env > /tmp/proxy.sh
             . /tmp/proxy.sh
             if [ "${PROXY_ENABLED:-false}" != "true" ]; then
