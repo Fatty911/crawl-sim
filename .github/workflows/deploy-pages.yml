@@ -17,7 +17,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -42,10 +42,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ACTION_PAT || github.token }}
         run: |
+          set -e
           mkdir -p release
-          for pat in sim-latest.json sim-filtered.json; do
-            gh release download data-latest --repo "$GITHUB_REPOSITORY" --pattern "$pat" --dir release || true
-          done
+          python scripts/download_verified_release.py --repo "$GITHUB_REPOSITORY" \
+            --pattern sim-latest.json --pattern sim-filtered.json --dir release
           ls -la release/ || true
 
       - name: Build site
